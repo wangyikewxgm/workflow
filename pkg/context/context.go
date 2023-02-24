@@ -18,28 +18,24 @@ package context
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 
-	"cuelang.org/go/cue/cuecontext"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/kubevela/pkg/util/rand"
-	"github.com/kubevela/workflow/pkg/cue/model"
 	"github.com/kubevela/workflow/pkg/cue/model/value"
 )
 
 const (
-	// ConfigMapKeyComponents is the key in ConfigMap Data field for containing data of components
-	ConfigMapKeyComponents = "components"
 	// ConfigMapKeyVars is the key in ConfigMap Data field for containing data of variable
 	ConfigMapKeyVars = "vars"
 	// AnnotationStartTimestamp is the annotation key of the workflow start  timestamp
@@ -55,36 +51,8 @@ type WorkflowContext struct {
 	cli         client.Client
 	store       *corev1.ConfigMap
 	memoryStore *sync.Map
-	components  map[string]*ComponentManifest
 	vars        *value.Value
 	modified    bool
-}
-
-// GetComponent Get ComponentManifest from workflow context.
-func (wf *WorkflowContext) GetComponent(name string) (*ComponentManifest, error) {
-	component, ok := wf.components[name]
-	if !ok {
-		return nil, errors.Errorf("component %s not found in application", name)
-	}
-	return component, nil
-}
-
-// GetComponents Get All ComponentManifest from workflow context.
-func (wf *WorkflowContext) GetComponents() map[string]*ComponentManifest {
-	return wf.components
-}
-
-// PatchComponent patch component with value.
-func (wf *WorkflowContext) PatchComponent(name string, patchValue *value.Value) error {
-	component, err := wf.GetComponent(name)
-	if err != nil {
-		return err
-	}
-	if err := component.Patch(patchValue); err != nil {
-		return err
-	}
-	wf.modified = true
-	return nil
 }
 
 // GetVar get variable from workflow context.
@@ -194,38 +162,30 @@ func (wf *WorkflowContext) writeToStore() error {
 	if err != nil {
 		return err
 	}
-	jsonObject := map[string]string{}
-	for name, comp := range wf.components {
-		s, err := comp.string()
-		if err != nil {
-			return errors.WithMessagef(err, "encode component %s ", name)
-		}
-		jsonObject[name] = s
-	}
 
 	if wf.store.Data == nil {
 		wf.store.Data = make(map[string]string)
 	}
-	b, err := json.Marshal(jsonObject)
-	if err != nil {
-		return err
-	}
-	wf.store.Data[ConfigMapKeyComponents] = string(b)
+
 	wf.store.Data[ConfigMapKeyVars] = varStr
 	return nil
 }
 
 func (wf *WorkflowContext) sync() error {
 	ctx := context.Background()
+	store := &corev1.ConfigMap{}
 	if EnableInMemoryContext {
 		MemStore.UpdateInMemoryContext(wf.store)
-	} else if err := wf.cli.Update(ctx, wf.store); err != nil {
+	} else if err := wf.cli.Get(ctx, types.NamespacedName{
+		Name:      wf.store.Name,
+		Namespace: wf.store.Namespace,
+	}, store); err != nil {
 		if kerrors.IsNotFound(err) {
 			return wf.cli.Create(ctx, wf.store)
 		}
 		return err
 	}
-	return nil
+	return wf.cli.Patch(ctx, wf.store, client.MergeFrom(store.DeepCopy()))
 }
 
 // LoadFromConfigMap recover workflow context from configMap.
@@ -234,21 +194,7 @@ func (wf *WorkflowContext) LoadFromConfigMap(cm corev1.ConfigMap) error {
 		wf.store = &cm
 	}
 	data := cm.Data
-	componentsJs := map[string]string{}
 
-	if data[ConfigMapKeyComponents] != "" {
-		if err := json.Unmarshal([]byte(data[ConfigMapKeyComponents]), &componentsJs); err != nil {
-			return errors.WithMessage(err, "decode components")
-		}
-		wf.components = map[string]*ComponentManifest{}
-		for name, compJs := range componentsJs {
-			cm := new(ComponentManifest)
-			if err := cm.unmarshal(compJs); err != nil {
-				return errors.WithMessagef(err, "unmarshal component(%s) manifest", name)
-			}
-			wf.components[name] = cm
-		}
-	}
 	var err error
 	wf.vars, err = value.NewValue(data[ConfigMapKeyVars], nil, "")
 	if err != nil {
@@ -268,74 +214,14 @@ func (wf *WorkflowContext) StoreRef() *corev1.ObjectReference {
 	}
 }
 
-// ComponentManifest contains resources rendered from an application component.
-type ComponentManifest struct {
-	Workload    model.Instance
-	Auxiliaries []model.Instance
-}
-
-// Patch the ComponentManifest with value
-func (comp *ComponentManifest) Patch(patchValue *value.Value) error {
-	return comp.Workload.Unify(patchValue.CueValue())
-}
-
-type componentMould struct {
-	StandardWorkload string
-	Traits           []string
-}
-
-func (comp *ComponentManifest) string() (string, error) {
-	workload, err := comp.Workload.String()
-	if err != nil {
-		return "", err
-	}
-	cm := componentMould{
-		StandardWorkload: workload,
-	}
-	for _, aux := range comp.Auxiliaries {
-		auxiliary, err := aux.String()
-		if err != nil {
-			return "", err
-		}
-		cm.Traits = append(cm.Traits, auxiliary)
-	}
-	js, err := json.Marshal(cm)
-	return string(js), err
-}
-
-func (comp *ComponentManifest) unmarshal(v string) error {
-
-	cm := componentMould{}
-	if err := json.Unmarshal([]byte(v), &cm); err != nil {
-		return err
-	}
-	wlInst := cuecontext.New().CompileString(cm.StandardWorkload)
-	wl, err := model.NewBase(wlInst)
-	if err != nil {
-		return err
-	}
-
-	comp.Workload = wl
-	for _, s := range cm.Traits {
-		auxInst := cuecontext.New().CompileString(s)
-		aux, err := model.NewOther(auxInst)
-		if err != nil {
-			return err
-		}
-		comp.Auxiliaries = append(comp.Auxiliaries, aux)
-	}
-
-	return nil
-}
-
 // NewContext new workflow context without initialize data.
-func NewContext(cli client.Client, ns, name string, owner []metav1.OwnerReference) (Context, error) {
-	wfCtx, err := newContext(cli, ns, name, owner)
+func NewContext(ctx context.Context, cli client.Client, ns, name string, owner []metav1.OwnerReference) (Context, error) {
+	wfCtx, err := newContext(ctx, cli, ns, name, owner)
 	if err != nil {
 		return nil, err
 	}
 
-	return wfCtx, wfCtx.Commit()
+	return wfCtx, nil
 }
 
 // CleanupMemoryStore cleans up memory store.
@@ -343,35 +229,45 @@ func CleanupMemoryStore(name, ns string) {
 	workflowMemoryCache.Delete(fmt.Sprintf("%s-%s", name, ns))
 }
 
-func newContext(cli client.Client, ns, name string, owner []metav1.OwnerReference) (*WorkflowContext, error) {
-	var (
-		ctx   = context.Background()
-		store corev1.ConfigMap
-	)
-	store.Name = generateStoreName(name)
-	store.Namespace = ns
-	store.SetOwnerReferences(owner)
+func newContext(ctx context.Context, cli client.Client, ns, name string, owner []metav1.OwnerReference) (*WorkflowContext, error) {
+	store := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            generateStoreName(name),
+			Namespace:       ns,
+			OwnerReferences: owner,
+		},
+		Data: map[string]string{
+			ConfigMapKeyVars: "",
+		},
+	}
+
+	kindConfigMap := reflect.TypeOf(corev1.ConfigMap{}).Name()
 	if EnableInMemoryContext {
-		MemStore.GetOrCreateInMemoryContext(&store)
-	} else if err := cli.Get(ctx, client.ObjectKey{Name: store.Name, Namespace: store.Namespace}, &store); err != nil {
+		MemStore.GetOrCreateInMemoryContext(store)
+	} else if err := cli.Get(ctx, client.ObjectKey{Name: store.Name, Namespace: store.Namespace}, store); err != nil {
 		if kerrors.IsNotFound(err) {
-			if err := cli.Create(ctx, &store); err != nil {
+			if err := cli.Create(ctx, store); err != nil {
 				return nil, err
 			}
+			store.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind(kindConfigMap))
 		} else {
 			return nil, err
 		}
 	} else if !reflect.DeepEqual(store.OwnerReferences, owner) {
-		store = corev1.ConfigMap{
+		store = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            fmt.Sprintf("%s-%s", generateStoreName(name), rand.RandomString(5)),
 				Namespace:       ns,
 				OwnerReferences: owner,
 			},
+			Data: map[string]string{
+				ConfigMapKeyVars: "",
+			},
 		}
-		if err := cli.Create(ctx, &store); err != nil {
+		if err := cli.Create(ctx, store); err != nil {
 			return nil, err
 		}
+		store.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind(kindConfigMap))
 	}
 	store.Annotations = map[string]string{
 		AnnotationStartTimestamp: time.Now().String(),
@@ -379,9 +275,8 @@ func newContext(cli client.Client, ns, name string, owner []metav1.OwnerReferenc
 	memCache := getMemoryStore(fmt.Sprintf("%s-%s", name, ns))
 	wfCtx := &WorkflowContext{
 		cli:         cli,
-		store:       &store,
+		store:       store,
 		memoryStore: memCache,
-		components:  map[string]*ComponentManifest{},
 		modified:    true,
 	}
 	var err error

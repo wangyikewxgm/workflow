@@ -70,7 +70,8 @@ func lookUp(node ast.Node, paths ...string) (ast.Node, error) {
 	return nil, notFoundErr
 }
 
-func lookUpAll(node ast.Node, paths ...string) []ast.Node {
+// LookUpAll look up all the nodes by paths
+func LookUpAll(node ast.Node, paths ...string) []ast.Node {
 	if len(paths) == 0 {
 		return []ast.Node{node}
 	}
@@ -81,7 +82,7 @@ func lookUpAll(node ast.Node, paths ...string) []ast.Node {
 		for _, decl := range x.Decls {
 			nnode := lookField(decl, key)
 			if nnode != nil {
-				nodes = append(nodes, lookUpAll(nnode, paths[1:]...)...)
+				nodes = append(nodes, LookUpAll(nnode, paths[1:]...)...)
 			}
 		}
 
@@ -89,13 +90,13 @@ func lookUpAll(node ast.Node, paths ...string) []ast.Node {
 		for _, elt := range x.Elts {
 			nnode := lookField(elt, key)
 			if nnode != nil {
-				nodes = append(nodes, lookUpAll(nnode, paths[1:]...)...)
+				nodes = append(nodes, LookUpAll(nnode, paths[1:]...)...)
 			}
 		}
 	case *ast.ListLit:
 		for index, elt := range x.Elts {
 			if strconv.Itoa(index) == key {
-				return lookUpAll(elt, paths[1:]...)
+				return LookUpAll(elt, paths[1:]...)
 			}
 		}
 	}
@@ -136,7 +137,7 @@ func doBuiltinFunc(root ast.Node, pathSel ast.Expr, do func(values []ast.Node) (
 	if len(paths) == 0 {
 		return nil, errors.New("path resolve error")
 	}
-	values := lookUpAll(root, paths...)
+	values := LookUpAll(root, paths...)
 	return do(values)
 }
 
@@ -187,14 +188,15 @@ func peelCloseExpr(node ast.Node) ast.Node {
 func lookField(node ast.Node, key string) ast.Node {
 	if field, ok := node.(*ast.Field); ok {
 		// Note: the trim here has side effect: "\(v)" will be trimmed to \(v), only used for comparing fields
-		if strings.Trim(labelStr(field.Label), `"`) == strings.Trim(key, `"`) {
+		if strings.Trim(LabelStr(field.Label), `"`) == strings.Trim(key, `"`) {
 			return field.Value
 		}
 	}
 	return nil
 }
 
-func labelStr(label ast.Label) string {
+// LabelStr get the string label
+func LabelStr(label ast.Label) string {
 	switch v := label.(type) {
 	case *ast.Ident:
 		return v.Name
@@ -311,8 +313,9 @@ func OpenBaiscLit(val cue.Value) (*ast.File, error) {
 	return f, err
 }
 
+// OpenListLit make that the listLit can be modified.
 // nolint:staticcheck
-func openListLit(val cue.Value) (*ast.File, error) {
+func OpenListLit(val cue.Value) (*ast.File, error) {
 	f, err := ToFile(val.Syntax(cue.Docs(true), cue.ResolveReferences(true)))
 	if err != nil {
 		return nil, err

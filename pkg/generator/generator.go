@@ -21,12 +21,15 @@ import (
 	"encoding/json"
 	"errors"
 
+	metrics2 "github.com/kubevela/workflow/pkg/providers/metrics"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	monitorContext "github.com/kubevela/pkg/monitor/context"
 	"github.com/kubevela/pkg/util/rand"
+
+	"github.com/oam-dev/kubevela/pkg/config/provider"
 
 	"github.com/kubevela/workflow/api/v1alpha1"
 	"github.com/kubevela/workflow/pkg/cue/process"
@@ -76,6 +79,7 @@ func GenerateRunners(ctx monitorContext.Context, instance *types.WorkflowInstanc
 // GenerateWorkflowInstance generates a workflow instance
 func GenerateWorkflowInstance(ctx context.Context, cli client.Client, run *v1alpha1.WorkflowRun) (*types.WorkflowInstance, error) {
 	var steps []v1alpha1.WorkflowStep
+	mode := run.Spec.Mode
 	switch {
 	case run.Spec.WorkflowSpec != nil:
 		steps = run.Spec.WorkflowSpec.Steps
@@ -88,6 +92,9 @@ func GenerateWorkflowInstance(ctx context.Context, cli client.Client, run *v1alp
 			return nil, err
 		}
 		steps = template.WorkflowSpec.Steps
+		if template.Mode != nil && mode == nil {
+			mode = template.Mode
+		}
 	default:
 		return nil, errors.New("failed to generate workflow instance")
 	}
@@ -113,6 +120,7 @@ func GenerateWorkflowInstance(ctx context.Context, cli client.Client, run *v1alp
 			Namespace:   run.Namespace,
 			Annotations: run.Annotations,
 			Labels:      run.Labels,
+			UID:         run.UID,
 			ChildOwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion: v1alpha1.SchemeGroupVersion.String(),
@@ -125,7 +133,7 @@ func GenerateWorkflowInstance(ctx context.Context, cli client.Client, run *v1alp
 		},
 		Context: contextData,
 		Debug:   debug,
-		Mode:    run.Spec.Mode,
+		Mode:    mode,
 		Steps:   steps,
 		Status:  run.Status,
 	}
@@ -152,6 +160,8 @@ func installBuiltinProviders(instance *types.WorkflowInstance, client client.Cli
 	email.Install(providerHandlers)
 	util.Install(providerHandlers, pCtx)
 	http.Install(providerHandlers, client, instance.Namespace)
+	provider.Install(providerHandlers, client, nil)
+	metrics2.Install(providerHandlers)
 	kube.Install(providerHandlers, client, map[string]string{
 		types.LabelWorkflowRunName:      instance.Name,
 		types.LabelWorkflowRunNamespace: instance.Namespace,

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/parser"
 	"k8s.io/klog/v2"
@@ -30,7 +31,12 @@ import (
 
 func init() {
 	var err error
-	builtinImport, err = initBuiltinImports()
+	pkgs, err := GetPackages()
+	if err != nil {
+		klog.ErrorS(err, "Unable to init builtin packages for imports")
+		os.Exit(1)
+	}
+	builtinImport, err = InitBuiltinImports(pkgs)
 	if err != nil {
 		klog.ErrorS(err, "Unable to init builtin imports")
 		os.Exit(1)
@@ -38,61 +44,85 @@ func init() {
 }
 
 var (
-	//go:embed pkgs op.cue
+	//go:embed actions
 	fs embed.FS
 	// builtinImport is the builtin import for cue
-	builtinImport *build.Instance
-	// GeneralImports is the general imports for cue
-	GeneralImports []*build.Instance
+	builtinImport []*build.Instance
 )
 
 const (
 	builtinPackageName = "vela/op"
+	builtinActionPath  = "actions"
+	packagePath        = "pkgs"
+	defaultVersion     = "v1"
 )
 
-// SetupGeneralImports setup general imports
-func SetupGeneralImports(general []*build.Instance) {
-	GeneralImports = general
+// SetupBuiltinImports setup builtin imports
+func SetupBuiltinImports(pkgs map[string]string) error {
+	builtin, err := GetPackages()
+	if err != nil {
+		return err
+	}
+	for k, v := range pkgs {
+		file, err := parser.ParseFile("-", v, parser.ParseComments)
+		if err != nil {
+			return err
+		}
+		if original, ok := builtin[k]; ok {
+			builtin[k] = mergeFiles(original, file)
+		} else {
+			builtin[k] = file
+		}
+	}
+	builtinImport, err = InitBuiltinImports(builtin)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetPackages Get Stdlib packages
-func GetPackages() (string, error) {
-	files, err := fs.ReadDir("pkgs")
+func GetPackages() (map[string]*ast.File, error) {
+	versions, err := fs.ReadDir(builtinActionPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	ret := make(map[string]*ast.File)
 
-	opBytes, err := fs.ReadFile("op.cue")
-	if err != nil {
-		return "", err
-	}
-
-	opContent := string(opBytes) + "\n"
-	for _, file := range files {
-		body, err := fs.ReadFile("pkgs/" + file.Name())
+	for _, dirs := range versions {
+		pathPrefix := fmt.Sprintf("%s/%s", builtinActionPath, dirs.Name())
+		files, err := fs.ReadDir(fmt.Sprintf("%s/%s", pathPrefix, packagePath))
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		pkgContent := fmt.Sprintf("%s: {\n%s\n}\n", strings.TrimSuffix(file.Name(), ".cue"), string(body))
-		opContent += pkgContent
+		opBytes, err := fs.ReadFile(fmt.Sprintf("%s/%s", pathPrefix, "op.cue"))
+		if err != nil {
+			return nil, err
+		}
+		opContent := string(opBytes) + "\n"
+		for _, file := range files {
+			body, err := fs.ReadFile(fmt.Sprintf("%s/%s/%s", pathPrefix, packagePath, file.Name()))
+			if err != nil {
+				return nil, err
+			}
+			pkgContent := fmt.Sprintf("%s: {\n%s\n}\n", strings.TrimSuffix(file.Name(), ".cue"), string(body))
+			opContent += pkgContent
+		}
+		f, err := parser.ParseFile("-", opContent, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+		if dirs.Name() == defaultVersion {
+			ret[builtinPackageName] = f
+		}
+		ret[filepath.Join(builtinPackageName, dirs.Name())] = f
 	}
-
-	return opContent, nil
+	return ret, nil
 }
 
 // AddImportsFor install imports for build.Instance.
 func AddImportsFor(inst *build.Instance, tagTempl string) error {
-	inst.Imports = append(inst.Imports, GeneralImports...)
-	addDefault := true
-	for _, a := range inst.Imports {
-		if a.PkgName == filepath.Base(builtinPackageName) {
-			addDefault = false
-			break
-		}
-	}
-	if addDefault {
-		inst.Imports = append(inst.Imports, builtinImport)
-	}
+	inst.Imports = append(inst.Imports, builtinImport...)
 	if tagTempl != "" {
 		p := &build.Instance{
 			PkgName:    filepath.Base("vela/custom"),
@@ -110,21 +140,23 @@ func AddImportsFor(inst *build.Instance, tagTempl string) error {
 	return nil
 }
 
-func initBuiltinImports() (*build.Instance, error) {
-	pkg, err := GetPackages()
-	if err != nil {
-		return nil, err
+// InitBuiltinImports init built in imports
+func InitBuiltinImports(pkgs map[string]*ast.File) ([]*build.Instance, error) {
+	imports := make([]*build.Instance, 0)
+	for path, content := range pkgs {
+		p := &build.Instance{
+			PkgName:    filepath.Base(path),
+			ImportPath: path,
+		}
+		if err := p.AddSyntax(content); err != nil {
+			return nil, err
+		}
+		imports = append(imports, p)
 	}
-	p := &build.Instance{
-		PkgName:    filepath.Base(builtinPackageName),
-		ImportPath: builtinPackageName,
-	}
-	file, err := parser.ParseFile("-", pkg, parser.ParseComments)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.AddSyntax(file); err != nil {
-		return nil, err
-	}
-	return p, nil
+	return imports, nil
+}
+
+func mergeFiles(base, file *ast.File) *ast.File {
+	base.Decls = append(base.Decls, file.Decls...)
+	return base
 }

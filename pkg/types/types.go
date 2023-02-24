@@ -21,6 +21,7 @@ import (
 
 	"cuelang.org/go/cue"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/util/feature"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -52,13 +53,14 @@ type WorkflowMeta struct {
 	Namespace            string
 	Annotations          map[string]string
 	Labels               map[string]string
+	UID                  types.UID
 	ChildOwnerReferences []metav1.OwnerReference
 }
 
 // TaskRunner is a task runner
 type TaskRunner interface {
 	Name() string
-	Pending(ctx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus)
+	Pending(ctx monitorContext.Context, wfCtx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus)
 	Run(ctx wfContext.Context, options *TaskRunOptions) (v1alpha1.StepStatus, *Operation, error)
 }
 
@@ -69,7 +71,7 @@ type TaskDiscover interface {
 
 // Engine is the engine to run workflow
 type Engine interface {
-	Run(taskRunners []TaskRunner, dag bool) error
+	Run(ctx monitorContext.Context, taskRunners []TaskRunner, dag bool) error
 	GetStepStatus(stepName string) v1alpha1.WorkflowStepStatus
 	GetCommonStepStatus(stepName string) v1alpha1.StepStatus
 	SetParentRunner(name string)
@@ -102,6 +104,9 @@ type PreCheckOptions struct {
 	BasicTemplate   string
 	BasicValue      *value.Value
 }
+
+// StatusPatcher is the interface to patch status
+type StatusPatcher func(ctx context.Context, status *v1alpha1.WorkflowRunStatus, isUpdate bool) error
 
 // TaskPreCheckHook is the hook for pre check.
 type TaskPreCheckHook func(step v1alpha1.WorkflowStep, options *PreCheckOptions) (*PreCheckResult, error)
@@ -161,6 +166,7 @@ type Action interface {
 	Terminate(message string)
 	Wait(message string)
 	Fail(message string)
+	Message(message string)
 }
 
 // Parameter defines a parameter for cli from capability template
@@ -197,8 +203,6 @@ type LogConfig struct {
 }
 
 const (
-	// ContextKeyMetadata is key that refer to workflow metadata.
-	ContextKeyMetadata = "metadata__"
 	// ContextPrefixFailedTimes is the prefix that refer to the failed times of the step in workflow context config map.
 	ContextPrefixFailedTimes = "failed_times"
 	// ContextPrefixBackoffTimes is the prefix that refer to the backoff times in workflow context config map.
@@ -255,6 +259,8 @@ const (
 	StatusReasonTerminate = "Terminate"
 	// StatusReasonParameter is the reason of the workflow progress condition which is ProcessParameter.
 	StatusReasonParameter = "ProcessParameter"
+	// StatusReasonInput is the reason of the workflow progress condition which is Input.
+	StatusReasonInput = "Input"
 	// StatusReasonOutput is the reason of the workflow progress condition which is Output.
 	StatusReasonOutput = "Output"
 	// StatusReasonFailedAfterRetries is the reason of the workflow progress condition which is FailedAfterRetries.
@@ -266,8 +272,6 @@ const (
 )
 
 const (
-	// MessageTerminated is the message of failed workflow
-	MessageTerminated = "The workflow terminates because of the failed steps"
 	// MessageSuspendFailedAfterRetries is the message of failed after retries
 	MessageSuspendFailedAfterRetries = "The workflow suspends automatically because the failed times of steps have reached the limit"
 )
@@ -275,6 +279,8 @@ const (
 const (
 	// AnnotationWorkflowRunDebug is the annotation for debug
 	AnnotationWorkflowRunDebug = "workflowrun.oam.dev/debug"
+	// AnnotationControllerRequirement indicates the controller version that can process the workflow run
+	AnnotationControllerRequirement = "workflowrun.oam.dev/controller-version-require"
 )
 
 // IsStepFinish will decide whether step is finish.

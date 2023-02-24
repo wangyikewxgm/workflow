@@ -109,6 +109,11 @@ spec:
           securityContext:
           {{- toYaml .Values.securityContext | nindent 12 }}
           args:
+            - "-test.coverprofile=/workspace/data/e2e-profile.out"
+            - "__DEVEL__E2E"
+            - "-test.run=E2EMain"
+            - "-test.coverpkg=$(go list ./pkg/...| tr '
+' ','| sed 's/,$//g')"
             {{ if .Values.admissionWebhooks.enabled }}
             - "--use-webhook=true"
             - "--webhook-port={{ .Values.webhookService.port }}"
@@ -125,11 +130,15 @@ spec:
             - "--leader-elect"
             - "--health-probe-bind-address=:{{ .Values.healthCheck.port }}"
             - "--concurrent-reconciles={{ .Values.concurrentReconciles }}"
+            - "--ignore-workflow-without-controller-requirement={{ .Values.ignoreWorkflowWithoutControllerRequirement }}"
             - "--kube-api-qps={{ .Values.kubeClient.qps }}"
             - "--kube-api-burst={{ .Values.kubeClient.burst }}"
+            - "--user-agent={{ .Values.kubeClient.userAgent }}"
             - "--max-workflow-wait-backoff-time={{ .Values.workflow.backoff.maxTime.waitState }}"
             - "--max-workflow-failed-backoff-time={{ .Values.workflow.backoff.maxTime.failedState }}"
             - "--max-workflow-step-error-retry-times={{ .Values.workflow.step.errorRetryTimes }}"
+            - "--feature-gates=EnableWatchEventListener={{- .Values.workflow.enableWatchEventListener | toString -}}"
+            - "--feature-gates=EnablePatchStatusAtOnce={{- .Values.workflow.enablePatchStatusAtOnce | toString -}}"
             - "--feature-gates=EnableSuspendOnFailure={{- .Values.workflow.enableSuspendOnFailure | toString -}}"
             - "--feature-gates=EnableBackupWorkflowRecord={{- .Values.backup.enabled | toString -}}"
             {{ if .Values.backup.enable }}
@@ -138,6 +147,8 @@ spec:
             - "--backup-group-by-label={{ .Values.backup.groupByLabel }}"
             - "--backup-clean-on-backup={{ .Values.backup.cleanOnBackup }}"
             - "--backup-persist-type={{ .Values.backup.persisType }}"
+            - "--backup-config-secret-name={{ .Values.backup.configSecretName }}"
+            - "--backup-config-secret-namespace={{ .Values.backup.configSecretNamespace }}"
             {{ end }}
           image: {{ .Values.imageRegistry }}{{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ quote .Values.image.pullPolicy }}

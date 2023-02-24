@@ -27,9 +27,9 @@ import (
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/cuecontext"
+	"cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/cue/parser"
-	"cuelang.org/go/cue/token"
 	"github.com/cue-exp/kubevelafix"
 	"github.com/pkg/errors"
 
@@ -81,6 +81,30 @@ func (val *Value) UnmarshalTo(x interface{}) error {
 		return err
 	}
 	return json.Unmarshal(data, x)
+}
+
+// SubstituteInStruct substitute expr in struct lit value
+// nolint:staticcheck
+func (val *Value) SubstituteInStruct(expr ast.Expr, key string) error {
+	node := val.CueValue().Syntax(cue.ResolveReferences(true))
+	x, ok := node.(*ast.StructLit)
+	if !ok {
+		return errors.New("value is not a struct lit")
+	}
+	for i := range x.Elts {
+		if field, ok := x.Elts[i].(*ast.Field); ok {
+			if strings.Trim(sets.LabelStr(field.Label), `"`) == strings.Trim(key, `"`) {
+				x.Elts[i].(*ast.Field).Value = expr
+				b, err := format.Node(node)
+				if err != nil {
+					return err
+				}
+				val.v = val.r.CompileBytes(b)
+				return nil
+			}
+		}
+	}
+	return errors.New("key not found in struct")
 }
 
 // NewValue new a value
@@ -291,42 +315,89 @@ func (val *Value) FillRaw(x string, paths ...string) error {
 
 // FillValueByScript unify the value x at the given script path.
 func (val *Value) FillValueByScript(x *Value, path string) error {
-	if !strings.Contains(path, "[") {
-		newV := val.v.FillPath(FieldPath(path), x.v)
-		if err := newV.Err(); err != nil {
-			return err
-		}
-		val.v = newV
-		return nil
-	}
-	s, err := x.String()
+	f, err := sets.OpenListLit(val.v)
 	if err != nil {
 		return err
 	}
-	return val.fillRawByScript(s, path)
+	v := val.r.BuildFile(f)
+	newV := v.FillPath(FieldPath(path), x.v)
+	if err := newV.Err(); err != nil {
+		return err
+	}
+	val.v = newV
+	return nil
 }
 
-func (val *Value) fillRawByScript(x string, path string) error {
-	a := newAssembler(x)
-	pathExpr, err := parser.ParseExpr("path", path)
-	if err != nil {
-		return errors.WithMessage(err, "parse path")
+func setValue(orig ast.Node, expr ast.Expr, selectors []cue.Selector) error {
+	if len(selectors) == 0 {
+		return nil
 	}
-	if err := a.installTo(pathExpr); err != nil {
+	key := selectors[0]
+	selectors = selectors[1:]
+	switch x := orig.(type) {
+	case *ast.ListLit:
+		if key.Type() != cue.IndexLabel {
+			return fmt.Errorf("invalid key type %s in list lit", key.Type())
+		}
+		if len(selectors) == 0 {
+			for key.Index() >= len(x.Elts) {
+				x.Elts = append(x.Elts, ast.NewStruct())
+			}
+			x.Elts[key.Index()] = expr
+			return nil
+		}
+		return setValue(x.Elts[key.Index()], expr, selectors)
+	case *ast.StructLit:
+		if len(x.Elts) == 0 || (key.Type() == cue.StringLabel && len(sets.LookUpAll(x, key.String())) == 0) {
+			if len(selectors) == 0 {
+				x.Elts = append(x.Elts, &ast.Field{
+					Label: ast.NewString(key.String()),
+					Value: expr,
+				})
+			} else {
+				x.Elts = append(x.Elts, &ast.Field{
+					Label: ast.NewString(key.String()),
+					Value: ast.NewStruct(),
+				})
+			}
+			return setValue(x.Elts[len(x.Elts)-1].(*ast.Field).Value, expr, selectors)
+		}
+		for i := range x.Elts {
+			switch elem := x.Elts[i].(type) {
+			case *ast.Field:
+				if len(selectors) == 0 {
+					if key.Type() == cue.StringLabel && strings.Trim(sets.LabelStr(elem.Label), `"`) == strings.Trim(key.String(), `"`) {
+						x.Elts[i].(*ast.Field).Value = expr
+						return nil
+					}
+				}
+				if key.Type() == cue.StringLabel && strings.Trim(sets.LabelStr(elem.Label), `"`) == strings.Trim(key.String(), `"`) {
+					return setValue(x.Elts[i].(*ast.Field).Value, expr, selectors)
+				}
+			default:
+				return fmt.Errorf("not support type %T", elem)
+			}
+		}
+	default:
+		return fmt.Errorf("not support type %T", orig)
+	}
+	return nil
+}
+
+// SetValueByScript set the value v at the given script path.
+// nolint:staticcheck
+func (val *Value) SetValueByScript(v *Value, path ...string) error {
+	cuepath := FieldPath(path...)
+	selectors := cuepath.Selectors()
+	node := val.CueValue().Syntax(cue.ResolveReferences(true))
+	if err := setValue(node, v.CueValue().Syntax(cue.ResolveReferences(true)).(ast.Expr), selectors); err != nil {
 		return err
 	}
-	raw, err := val.String(sets.ListOpen)
+	b, err := format.Node(node)
 	if err != nil {
 		return err
 	}
-	v, err := val.MakeValue(raw + "\n" + a.v)
-	if err != nil {
-		return errors.WithMessage(err, "remake value")
-	}
-	if err := v.Error(); err != nil {
-		return err
-	}
-	*val = *v
+	val.v = val.r.CompileBytes(b)
 	return nil
 }
 
@@ -348,6 +419,26 @@ func (val *Value) FillObject(x interface{}, paths ...string) error {
 	// do not check newV.Err() error here, because the value may be filled later
 	val.v = newV
 	return nil
+}
+
+// SetObject set the value with object x at the given path.
+func (val *Value) SetObject(x interface{}, paths ...string) error {
+	insert := &Value{
+		r: val.r,
+	}
+	switch v := x.(type) {
+	case *Value:
+		if v.r != val.r {
+			return errors.New("filled value not created with same Runtime")
+		}
+		insert.v = v.v
+	case ast.Expr:
+		cueV := val.r.BuildExpr(v)
+		insert.v = cueV
+	default:
+		return fmt.Errorf("not support type %T", x)
+	}
+	return val.SetValueByScript(insert, paths...)
 }
 
 // LookupValue reports the value at a path starting from val
@@ -677,69 +768,6 @@ func (val *Value) OpenCompleteValue() error {
 }
 func isDef(s string) bool {
 	return strings.HasPrefix(s, "#")
-}
-
-// assembler put value under parsed expression as path.
-type assembler struct {
-	v string
-}
-
-func newAssembler(v string) *assembler {
-	return &assembler{v: v}
-}
-
-func (a *assembler) fill2Path(p string) {
-	a.v = fmt.Sprintf("%s: %s", p, a.v)
-}
-
-func (a *assembler) fill2Array(i int) {
-	s := ""
-	for j := 0; j < i; j++ {
-		s += "_,"
-	}
-	if strings.Contains(a.v, ":") && !strings.HasPrefix(a.v, "{") {
-		a.v = fmt.Sprintf("{ %s }", a.v)
-	}
-	a.v = fmt.Sprintf("[%s%s]", s, strings.TrimSpace(a.v))
-}
-
-func (a *assembler) installTo(expr ast.Expr) error {
-	switch v := expr.(type) {
-	case *ast.IndexExpr:
-		if err := a.installTo(v.Index); err != nil {
-			return err
-		}
-		if err := a.installTo(v.X); err != nil {
-			return err
-		}
-	case *ast.SelectorExpr:
-		if ident, ok := v.Sel.(*ast.Ident); ok {
-			if err := a.installTo(ident); err != nil {
-				return err
-			}
-		} else {
-			return errors.New("invalid sel type in selector")
-		}
-		if err := a.installTo(v.X); err != nil {
-			return err
-		}
-
-	case *ast.Ident:
-		a.fill2Path(v.String())
-	case *ast.BasicLit:
-		switch v.Kind {
-		case token.STRING:
-			a.fill2Path(v.Value)
-		case token.INT:
-			idex, _ := strconv.Atoi(v.Value)
-			a.fill2Array(idex)
-		default:
-			return errors.New("invalid path")
-		}
-	default:
-		return errors.New("invalid path")
-	}
-	return nil
 }
 
 // makePath creates a Path from a sequence of string.

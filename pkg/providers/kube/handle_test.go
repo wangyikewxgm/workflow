@@ -38,7 +38,6 @@ import (
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/controller-runtime/pkg/envtest/printer"
 	"sigs.k8s.io/yaml"
 
 	monitorContext "github.com/kubevela/pkg/monitor/context"
@@ -61,9 +60,7 @@ var p *provider
 func TestProvider(t *testing.T) {
 	RegisterFailHandler(Fail)
 
-	RunSpecsWithDefaultAndCustomReporters(t,
-		"Test Definition Suite",
-		[]Reporter{printer.NewlineReporter{}})
+	RunSpecs(t, "Test Definition Suite")
 }
 
 var _ = BeforeSuite(func(done Done) {
@@ -96,6 +93,9 @@ var _ = BeforeSuite(func(done Done) {
 			Apply:  d.apply,
 			Delete: d.delete,
 		},
+		labels: map[string]string{
+			"hello": "world",
+		},
 	}
 	close(done)
 }, 120)
@@ -111,18 +111,16 @@ var _ = Describe("Test Workflow Provider Kube", func() {
 		ctx, err := newWorkflowContextForTest()
 		Expect(err).ToNot(HaveOccurred())
 
-		component, err := ctx.GetComponent("server")
-		Expect(err).ToNot(HaveOccurred())
-
-		s, err := component.Workload.String()
-		Expect(err).ToNot(HaveOccurred())
 		v, err := value.NewValue(fmt.Sprintf(`
 value:{
 	%s
 	metadata: name: "app"
+	metadata: labels: {
+		"test": "test"
+	}
 }
 cluster: ""
-`, s), nil, "")
+`, componentStr), nil, "")
 		Expect(err).ToNot(HaveOccurred())
 		mCtx := monitorContext.NewTraceContext(context.Background(), "")
 		err = p.Apply(mCtx, ctx, v, nil)
@@ -134,28 +132,26 @@ cluster: ""
 			metadata: name: "app"
 		}
 		cluster: ""
-		`, s), nil, "")
+		`, componentStr), nil, "")
 		Expect(err).ToNot(HaveOccurred())
 		err = p.Apply(mCtx, ctx, v, nil)
 		Expect(err).ToNot(HaveOccurred())
-		workload, err := component.Workload.Unstructured()
-		Expect(err).ToNot(HaveOccurred())
+		workload := &corev1.Pod{}
 		Eventually(func() error {
 			return k8sClient.Get(context.Background(), client.ObjectKey{
 				Namespace: "default",
 				Name:      "app",
 			}, workload)
 		}, time.Second*2, time.Millisecond*300).Should(BeNil())
+		Expect(len(workload.GetLabels())).To(Equal(2))
 
-		s, err = component.Workload.String()
-		Expect(err).ToNot(HaveOccurred())
 		v, err = value.NewValue(fmt.Sprintf(`
 value: {
 %s
 metadata: name: "app"
 }
 cluster: ""
-`, s), nil, "")
+`, componentStr), nil, "")
 		Expect(err).ToNot(HaveOccurred())
 		err = p.Read(mCtx, ctx, v, nil)
 		Expect(err).ToNot(HaveOccurred())
@@ -176,27 +172,51 @@ cluster: ""
 		ctx, err := newWorkflowContextForTest()
 		Expect(err).ToNot(HaveOccurred())
 
-		component, err := ctx.GetComponent("server")
-		Expect(err).ToNot(HaveOccurred())
-		s, err := component.Workload.String()
-		Expect(err).ToNot(HaveOccurred())
 		v, err := value.NewValue(fmt.Sprintf(`
-value: {%s}
+value:{
+	%s
+	metadata: name: "test-app-1"
+	metadata: labels: {
+		"test": "test"
+	}
+}
 cluster: ""
-patch: metadata: name: "test-app-1"`, s), nil, "")
+`, componentStr), nil, "")
 		Expect(err).ToNot(HaveOccurred())
 		mCtx := monitorContext.NewTraceContext(context.Background(), "")
 		err = p.Apply(mCtx, ctx, v, nil)
 		Expect(err).ToNot(HaveOccurred())
 
-		workload, err := component.Workload.Unstructured()
+		v, err = value.NewValue(`
+value: {
+	apiVersion: "v1"
+	kind:       "Pod"
+	metadata: name: "test-app-1"
+}
+cluster: ""
+patch: {
+	metadata: name: "test-app-1"
+	spec: {
+		containers: [{
+			// +patchStrategy=retainKeys
+			image: "nginx:notfound"
+		}]
+	}
+}`, nil, "")
+		Expect(err).ToNot(HaveOccurred())
+		err = p.Patch(mCtx, ctx, v, nil)
+		Expect(err).ToNot(HaveOccurred())
+
+		pod := &corev1.Pod{}
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(func() error {
 			return k8sClient.Get(context.Background(), client.ObjectKey{
 				Namespace: "default",
 				Name:      "test-app-1",
-			}, workload)
+			}, pod)
 		}, time.Second*2, time.Millisecond*300).Should(BeNil())
+		Expect(pod.Name).To(Equal("test-app-1"))
+		Expect(pod.Spec.Containers[0].Image).To(Equal("nginx:notfound"))
 	})
 
 	It("list", func() {
@@ -248,7 +268,7 @@ cluster: ""
 		expected := &metav1.PartialObjectMetadataList{}
 		err = result.UnmarshalTo(expected)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(len(expected.Items)).Should(Equal(3))
+		Expect(len(expected.Items)).Should(Equal(4))
 
 		By("List pods with labels index=test-1")
 		v, err = value.NewValue(`
@@ -322,15 +342,66 @@ cluster: ""
 		Expect(errors.IsNotFound(err)).Should(Equal(true))
 	})
 
+	It("delete with labels", func() {
+		ctx := context.Background()
+		err := k8sClient.Create(ctx, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test",
+				Namespace: "default",
+				Labels: map[string]string{
+					"test.oam.dev": "true",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test",
+						Image: "busybox",
+					},
+				},
+			},
+		})
+		Expect(err).ToNot(HaveOccurred())
+		err = k8sClient.Get(ctx, types.NamespacedName{
+			Name:      "test",
+			Namespace: "default",
+		}, &corev1.Pod{})
+		Expect(err).ToNot(HaveOccurred())
+
+		v, err := value.NewValue(`
+value: {
+apiVersion: "v1"
+kind: "Pod"
+metadata: {
+  namespace: "default"
+}
+}
+filter: {
+  namespace: "default"
+  matchingLabels: {
+      "test.oam.dev": "true"
+  }
+}
+cluster: ""
+`, nil, "")
+		Expect(err).ToNot(HaveOccurred())
+		wfCtx, err := newWorkflowContextForTest()
+		Expect(err).ToNot(HaveOccurred())
+		mCtx := monitorContext.NewTraceContext(context.Background(), "")
+		err = p.Delete(mCtx, wfCtx, v, nil)
+		Expect(err).ToNot(HaveOccurred())
+		err = k8sClient.Get(ctx, types.NamespacedName{
+			Name:      "test",
+			Namespace: "default",
+		}, &corev1.Pod{})
+		Expect(err).To(HaveOccurred())
+		Expect(errors.IsNotFound(err)).Should(Equal(true))
+	})
+
 	It("apply parallel", func() {
 		ctx, err := newWorkflowContextForTest()
 		Expect(err).ToNot(HaveOccurred())
 
-		component, err := ctx.GetComponent("server")
-		Expect(err).ToNot(HaveOccurred())
-
-		s, err := component.Workload.String()
-		Expect(err).ToNot(HaveOccurred())
 		v, err := value.NewValue(fmt.Sprintf(`
 value:[
   {
@@ -343,7 +414,7 @@ value:[
 	}
 ]
 cluster: ""
-`, s, s), nil, "")
+`, componentStr, componentStr), nil, "")
 		Expect(err).ToNot(HaveOccurred())
 		mCtx := monitorContext.NewTraceContext(context.Background(), "")
 		err = p.ApplyInParallel(mCtx, ctx, v, nil)
@@ -429,9 +500,31 @@ func newWorkflowContextForTest() (wfContext.Context, error) {
 }
 
 var (
+	componentStr = `apiVersion: "v1"
+kind:       "Pod"
+metadata: {
+	labels: {
+		app: "nginx"
+	}
+}
+spec: {
+	containers: [{
+		env: [{
+			name:  "APP"
+			value: "nginx"
+		}]
+		image:           "nginx:1.14.2"
+		imagePullPolicy: "IfNotPresent"
+		name:            "main"
+		ports: [{
+			containerPort: 8080
+			protocol:      "TCP"
+		}]
+	}]
+}`
 	testCaseYaml = `apiVersion: v1
 data:
-  components: '{"server":"{\"Scopes\":null,\"StandardWorkload\":\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Pod\\\",\\\"metadata\\\":{\\\"labels\\\":{\\\"app\\\":\\\"nginx\\\"}},\\\"spec\\\":{\\\"containers\\\":[{\\\"env\\\":[{\\\"name\\\":\\\"APP\\\",\\\"value\\\":\\\"nginx\\\"}],\\\"image\\\":\\\"nginx:1.14.2\\\",\\\"imagePullPolicy\\\":\\\"IfNotPresent\\\",\\\"name\\\":\\\"main\\\",\\\"ports\\\":[{\\\"containerPort\\\":8080,\\\"protocol\\\":\\\"TCP\\\"}]}]}}\",\"Traits\":[\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Service\\\",\\\"metadata\\\":{\\\"name\\\":\\\"my-service\\\"},\\\"spec\\\":{\\\"ports\\\":[{\\\"port\\\":80,\\\"protocol\\\":\\\"TCP\\\",\\\"targetPort\\\":8080}],\\\"selector\\\":{\\\"app\\\":\\\"nginx\\\"}}}\"]}"}'
+  test: ""
 kind: ConfigMap
 metadata:
   name: app-v1

@@ -23,7 +23,6 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,116 +31,6 @@ import (
 
 	"github.com/kubevela/workflow/pkg/cue/model/value"
 )
-
-func TestComponent(t *testing.T) {
-	wfCtx := newContextForTest(t)
-	r := require.New(t)
-
-	_, err := wfCtx.GetComponent("expected-not-found")
-	r.Equal(err.Error(), "component expected-not-found not found in application")
-	cmf, err := wfCtx.GetComponent("server")
-	r.NoError(err)
-	components := wfCtx.GetComponents()
-	_, ok := components["server"]
-	r.Equal(ok, true)
-
-	s, err := cmf.Workload.String()
-	r.NoError(err)
-	r.Equal(s, `apiVersion: "v1"
-kind:       "Pod"
-metadata: {
-	labels: {
-		app: "nginx"
-	}
-}
-spec: {
-	containers: [{
-		env: [{
-			name:  "APP"
-			value: "nginx"
-		}]
-		image:           "nginx:1.14.2"
-		imagePullPolicy: "IfNotPresent"
-		name:            "main"
-		ports: [{
-			containerPort: 8080
-			protocol:      "TCP"
-		}]
-	}]
-}
-`)
-	r.Equal(len(cmf.Auxiliaries), 1)
-	s, err = cmf.Auxiliaries[0].String()
-	r.NoError(err)
-	r.Equal(s, `apiVersion: "v1"
-kind:       "Service"
-metadata: {
-	name: "my-service"
-}
-spec: {
-	ports: [{
-		port:       80
-		protocol:   "TCP"
-		targetPort: 8080
-	}]
-	selector: {
-		app: "nginx"
-	}
-}
-`)
-
-	pv, err := value.NewValue(`
-spec: containers: [{
-// +patchKey=name
-env:[{name: "ClusterIP",value: "1.1.1.1"}]}]
-`, nil, "")
-	r.NoError(err)
-	err = wfCtx.PatchComponent("server", pv)
-	r.NoError(err)
-
-	cmf, err = wfCtx.GetComponent("server")
-	r.NoError(err)
-	s, err = cmf.Workload.String()
-	r.NoError(err)
-	r.Equal(s, `apiVersion: "v1"
-kind:       "Pod"
-metadata: {
-	labels: {
-		app: "nginx"
-	}
-}
-spec: {
-	containers: [{
-		// +patchKey=name
-		env: [{
-			name:  "APP"
-			value: "nginx"
-		}, {
-			name:  "ClusterIP"
-			value: "1.1.1.1"
-		}, ...]
-		image:           "nginx:1.14.2"
-		imagePullPolicy: "IfNotPresent"
-		name:            "main"
-		ports: [{
-			containerPort: 8080
-			protocol:      "TCP"
-		}, ...]
-	}]
-}
-`)
-
-	err = wfCtx.writeToStore()
-	r.NoError(err)
-	expected, err := yaml.Marshal(wfCtx.components)
-	r.NoError(err)
-
-	err = wfCtx.LoadFromConfigMap(*wfCtx.store)
-	r.NoError(err)
-	componentsYaml, err := yaml.Marshal(wfCtx.components)
-	r.NoError(err)
-	r.Equal(string(expected), string(componentsYaml))
-}
 
 func TestVars(t *testing.T) {
 	wfCtx := newContextForTest(t)
@@ -230,12 +119,12 @@ func TestContext(t *testing.T) {
 	cli := newCliForTest(t, nil)
 	r := require.New(t)
 
-	wfCtx, err := NewContext(cli, "default", "app-v1", []metav1.OwnerReference{{Name: "test1"}})
+	wfCtx, err := NewContext(context.Background(), cli, "default", "app-v1", []metav1.OwnerReference{{Name: "test1"}})
 	r.NoError(err)
 	err = wfCtx.Commit()
 	r.NoError(err)
 
-	_, err = NewContext(cli, "default", "app-v1", []metav1.OwnerReference{{Name: "test2"}})
+	_, err = NewContext(context.Background(), cli, "default", "app-v1", []metav1.OwnerReference{{Name: "test2"}})
 	r.NoError(err)
 
 	wfCtx, err = LoadContext(cli, "default", "app-v1", "workflow-app-v1-context")
@@ -247,18 +136,15 @@ func TestContext(t *testing.T) {
 	_, err = LoadContext(cli, "default", "app-v1", "workflow-app-v1-context")
 	r.Equal(err.Error(), `configMap "workflow-app-v1-context" not found`)
 
-	wfCtx, err = NewContext(cli, "default", "app-v1", nil)
+	_, err = NewContext(context.Background(), cli, "default", "app-v1", nil)
 	r.NoError(err)
-	r.Equal(len(wfCtx.GetComponents()), 0)
-	_, err = wfCtx.GetComponent("server")
-	r.Equal(err.Error(), "component server not found in application")
 }
 
 func TestGetStore(t *testing.T) {
 	cli := newCliForTest(t, nil)
 	r := require.New(t)
 
-	wfCtx, err := NewContext(cli, "default", "app-v1", nil)
+	wfCtx, err := NewContext(context.Background(), cli, "default", "app-v1", nil)
 	r.NoError(err)
 	err = wfCtx.Commit()
 	r.NoError(err)
@@ -271,7 +157,7 @@ func TestMutableValue(t *testing.T) {
 	cli := newCliForTest(t, nil)
 	r := require.New(t)
 
-	wfCtx, err := NewContext(cli, "default", "app-v1", nil)
+	wfCtx, err := NewContext(context.Background(), cli, "default", "app-v1", nil)
 	r.NoError(err)
 	err = wfCtx.Commit()
 	r.NoError(err)
@@ -289,7 +175,7 @@ func TestMemoryValue(t *testing.T) {
 	cli := newCliForTest(t, nil)
 	r := require.New(t)
 
-	wfCtx, err := NewContext(cli, "default", "app-v1", nil)
+	wfCtx, err := NewContext(context.Background(), cli, "default", "app-v1", nil)
 	r.NoError(err)
 	err = wfCtx.Commit()
 	r.NoError(err)
@@ -344,7 +230,7 @@ func newCliForTest(t *testing.T, wfCm *corev1.ConfigMap) *test.MockClient {
 			}
 			return nil
 		},
-		MockUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+		MockPatch: func(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			o, ok := obj.(*corev1.ConfigMap)
 			if ok {
 				if wfCm == nil {
@@ -376,7 +262,7 @@ func newContextForTest(t *testing.T) *WorkflowContext {
 var (
 	testCaseYaml = `apiVersion: v1
 data:
-  components: '{"server":"{\"Scopes\":null,\"StandardWorkload\":\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Pod\\\",\\\"metadata\\\":{\\\"labels\\\":{\\\"app\\\":\\\"nginx\\\"}},\\\"spec\\\":{\\\"containers\\\":[{\\\"env\\\":[{\\\"name\\\":\\\"APP\\\",\\\"value\\\":\\\"nginx\\\"}],\\\"image\\\":\\\"nginx:1.14.2\\\",\\\"imagePullPolicy\\\":\\\"IfNotPresent\\\",\\\"name\\\":\\\"main\\\",\\\"ports\\\":[{\\\"containerPort\\\":8080,\\\"protocol\\\":\\\"TCP\\\"}]}]}}\",\"Traits\":[\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Service\\\",\\\"metadata\\\":{\\\"name\\\":\\\"my-service\\\"},\\\"spec\\\":{\\\"ports\\\":[{\\\"port\\\":80,\\\"protocol\\\":\\\"TCP\\\",\\\"targetPort\\\":8080}],\\\"selector\\\":{\\\"app\\\":\\\"nginx\\\"}}}\"]}"}'
+  test: ""
 kind: ConfigMap
 metadata:
   name: app-v1

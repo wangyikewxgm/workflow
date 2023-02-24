@@ -41,14 +41,15 @@ import (
 // BackupReconciler reconciles a WorkflowRun object
 type BackupReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme            *runtime.Scheme
+	ControllerVersion string
 	BackupArgs
 	Args
 }
 
 // BackupArgs is the args for backup
 type BackupArgs struct {
-	PersistType    backup.PersistType
+	Persister      backup.PersistWorkflowRecord
 	BackupStrategy string
 	IgnoreStrategy string
 	GroupByLabel   string
@@ -85,6 +86,11 @@ func (r *BackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !r.matchControllerRequirement(run) {
+		logCtx.Info("skip workflowrun: not match the controller requirement of workflowrun")
+		return ctrl.Result{}, nil
 	}
 
 	if !run.Status.Finished {
@@ -130,9 +136,8 @@ func (r *BackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 func (r *BackupReconciler) backup(ctx monitorContext.Context, cli client.Client, run *v1alpha1.WorkflowRun) error {
-	persister := backup.NewPersister(r.PersistType)
-	if persister != nil {
-		if err := persister.Store(ctx, run); err != nil {
+	if r.Persister != nil {
+		if err := r.Persister.Store(ctx, run); err != nil {
 			return err
 		}
 	}
@@ -143,6 +148,18 @@ func (r *BackupReconciler) backup(ctx monitorContext.Context, cli client.Client,
 	}
 	ctx.Info("Successfully backup workflowrun", "workflowrun", run.Name)
 	return nil
+}
+
+func (r *BackupReconciler) matchControllerRequirement(wr *v1alpha1.WorkflowRun) bool {
+	if wr.Annotations != nil {
+		if requireVersion, ok := wr.Annotations[types.AnnotationControllerRequirement]; ok {
+			return requireVersion == r.ControllerVersion
+		}
+	}
+	if r.IgnoreWorkflowWithoutControllerRequirement {
+		return false
+	}
+	return true
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -179,7 +196,7 @@ func isLatestFailedRecord(ctx context.Context, cli client.Client, run *v1alpha1.
 	}
 	runs := &v1alpha1.WorkflowRunList{}
 	listOpt := &client.ListOptions{}
-	if groupByLabel != "" {
+	if groupByLabel != "" && run.Labels != nil && run.Labels[groupByLabel] != "" {
 		labels := &metav1.LabelSelector{
 			MatchLabels: map[string]string{
 				groupByLabel: run.Labels[groupByLabel],

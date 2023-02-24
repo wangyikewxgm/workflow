@@ -1,36 +1,34 @@
 package backup
 
 import (
-	"context"
+	"fmt"
 
+	monitorContext "github.com/kubevela/pkg/monitor/context"
 	"github.com/kubevela/workflow/api/v1alpha1"
+	"github.com/kubevela/workflow/pkg/backup/sls"
 )
-
-// PersistType is the type of persister.
-type PersistType string
 
 const (
 	// PersistTypeSLS is the SLS persister.
-	PersistTypeSLS PersistType = "sls"
+	PersistTypeSLS string = "sls"
 )
 
 // NewPersister is a factory method for creating a persister.
-func NewPersister(persistType PersistType) persistWorkflowRecord {
+func NewPersister(config map[string][]byte, persistType string) (PersistWorkflowRecord, error) {
+	if config == nil {
+		return nil, fmt.Errorf("empty config")
+	}
 	switch persistType {
 	case PersistTypeSLS:
-		return &slsHandler{}
+		return sls.NewSLSHandler(config)
+	case "":
+		return nil, nil
 	default:
-		return nil
+		return nil, fmt.Errorf("unsupported persist type %s", persistType)
 	}
 }
 
-type persistWorkflowRecord interface {
-	Store(ctx context.Context, run *v1alpha1.WorkflowRun) error
-}
-
-type slsHandler struct {
-}
-
-func (s *slsHandler) Store(ctx context.Context, run *v1alpha1.WorkflowRun) error {
-	return nil
+// PersistWorkflowRecord is the interface for record persist
+type PersistWorkflowRecord interface {
+	Store(ctx monitorContext.Context, run *v1alpha1.WorkflowRun) error
 }

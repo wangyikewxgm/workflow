@@ -17,7 +17,6 @@ limitations under the License.
 package workspace
 
 import (
-	"fmt"
 	"strings"
 
 	monitorContext "github.com/kubevela/pkg/monitor/context"
@@ -33,53 +32,6 @@ const (
 )
 
 type provider struct {
-}
-
-// Load get component from context.
-func (h *provider) Load(ctx monitorContext.Context, wfCtx wfContext.Context, v *value.Value, act types.Action) error {
-	componentName, _ := v.Field("component")
-	if !componentName.Exists() {
-		componets := wfCtx.GetComponents()
-		for name, c := range componets {
-			if err := fillComponent(v, c, "value", name); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	name, err := componentName.String()
-	if err != nil {
-		return err
-	}
-	component, err := wfCtx.GetComponent(name)
-	if err != nil {
-		return err
-	}
-	return fillComponent(v, component, "value")
-}
-
-func fillComponent(v *value.Value, component *wfContext.ComponentManifest, paths ...string) error {
-	workload, err := component.Workload.String()
-	if err != nil {
-		return err
-	}
-	if err := v.FillRaw(workload, append(paths, "workload")...); err != nil {
-		return err
-	}
-	if len(component.Auxiliaries) > 0 {
-		var auxiliaries []string
-		for _, aux := range component.Auxiliaries {
-			auxiliary, err := aux.String()
-			if err != nil {
-				return err
-			}
-			auxiliaries = append(auxiliaries, "{"+auxiliary+"}")
-		}
-		if err := v.FillRaw(fmt.Sprintf("[%s]", strings.Join(auxiliaries, ",")), append(paths, "auxiliaries")...); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // DoVar get & put variable from context.
@@ -123,28 +75,8 @@ func (h *provider) DoVar(ctx monitorContext.Context, wfCtx wfContext.Context, v 
 	return nil
 }
 
-// Export put data into context.
-func (h *provider) Export(ctx monitorContext.Context, wfCtx wfContext.Context, v *value.Value, act types.Action) error {
-	val, err := v.LookupValue("value")
-	if err != nil {
-		return err
-	}
-
-	nameValue, err := v.Field("component")
-	if err != nil {
-		return err
-	}
-
-	name, err := nameValue.String()
-	if err != nil {
-		return err
-	}
-	return wfCtx.PatchComponent(name, val)
-}
-
 // Wait let workflow wait.
 func (h *provider) Wait(ctx monitorContext.Context, wfCtx wfContext.Context, v *value.Value, act types.Action) error {
-
 	cv := v.CueValue()
 	if cv.Exists() {
 		ret := cv.LookupPath(value.FieldPath("continue"))
@@ -180,15 +112,24 @@ func (h *provider) Fail(ctx monitorContext.Context, wfCtx wfContext.Context, v *
 	return nil
 }
 
+// Message writes message to step status, note that the message will be overwritten by the next message.
+func (h *provider) Message(ctx monitorContext.Context, wfCtx wfContext.Context, v *value.Value, act types.Action) error {
+	var msg string
+	if v != nil {
+		msg, _ = v.GetString("message")
+	}
+	act.Message(msg)
+	return nil
+}
+
 // Install register handler to provider discover.
 func Install(p types.Providers) {
 	prd := &provider{}
 	p.Register(ProviderName, map[string]types.Handler{
-		"load":   prd.Load,
-		"export": prd.Export,
-		"wait":   prd.Wait,
-		"break":  prd.Break,
-		"fail":   prd.Fail,
-		"var":    prd.DoVar,
+		"wait":    prd.Wait,
+		"break":   prd.Break,
+		"fail":    prd.Fail,
+		"message": prd.Message,
+		"var":     prd.DoVar,
 	})
 }

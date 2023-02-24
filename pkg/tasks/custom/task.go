@@ -62,7 +62,7 @@ func (t *TaskLoader) GetTaskGenerator(ctx context.Context, name string) (types.T
 type taskRunner struct {
 	name         string
 	run          func(ctx wfContext.Context, options *types.TaskRunOptions) (v1alpha1.StepStatus, *types.Operation, error)
-	checkPending func(ctx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus)
+	checkPending func(ctx monitorContext.Context, wfCtx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus)
 }
 
 // Name return step name.
@@ -76,8 +76,8 @@ func (tr *taskRunner) Run(ctx wfContext.Context, options *types.TaskRunOptions) 
 }
 
 // Pending check task should be executed or not.
-func (tr *taskRunner) Pending(ctx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus) {
-	return tr.checkPending(ctx, stepStatus)
+func (tr *taskRunner) Pending(ctx monitorContext.Context, wfCtx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus) {
+	return tr.checkPending(ctx, wfCtx, stepStatus)
 }
 
 // nolint:gocyclo
@@ -112,13 +112,13 @@ func (t *TaskLoader) makeTaskGenerator(templ string) (types.TaskGenerator, error
 
 		tRunner := new(taskRunner)
 		tRunner.name = wfStep.Name
-		tRunner.checkPending = func(ctx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus) {
+		tRunner.checkPending = func(ctx monitorContext.Context, wfCtx wfContext.Context, stepStatus map[string]v1alpha1.StepStatus) (bool, v1alpha1.StepStatus) {
 			options := &types.TaskRunOptions{}
 			if t.runOptionsProcess != nil {
 				t.runOptionsProcess(options)
 			}
-			basicVal, _, _ := MakeBasicValue(ctx, t.pd, wfStep.Name, exec.wfStatus.ID, paramsStr, options.PCtx)
-			return CheckPending(ctx, wfStep, exec.wfStatus.ID, stepStatus, basicVal)
+			basicVal, _, _ := MakeBasicValue(ctx, wfCtx, t.pd, wfStep.Name, exec.wfStatus.ID, paramsStr, options.PCtx)
+			return CheckPending(wfCtx, wfStep, exec.wfStatus.ID, stepStatus, basicVal)
 		}
 		tRunner.run = func(ctx wfContext.Context, options *types.TaskRunOptions) (stepStatus v1alpha1.StepStatus, operations *types.Operation, rErr error) {
 			if options.GetTracer == nil {
@@ -136,7 +136,7 @@ func (t *TaskLoader) makeTaskGenerator(templ string) (types.TaskGenerator, error
 				t.runOptionsProcess(options)
 			}
 
-			basicVal, basicTemplate, err := MakeBasicValue(ctx, t.pd, wfStep.Name, exec.wfStatus.ID, paramsStr, options.PCtx)
+			basicVal, basicTemplate, err := MakeBasicValue(tracer, ctx, t.pd, wfStep.Name, exec.wfStatus.ID, paramsStr, options.PCtx)
 			if err != nil {
 				tracer.Error(err, "make context parameter")
 				return v1alpha1.StepStatus{}, nil, errors.WithMessage(err, "make context parameter")
@@ -157,7 +157,7 @@ func (t *TaskLoader) makeTaskGenerator(templ string) (types.TaskGenerator, error
 					}
 				}
 				if options.Debug != nil {
-					if err := options.Debug(exec.wfStatus.Name, taskv); err != nil {
+					if err := options.Debug(exec.wfStatus.ID, taskv); err != nil {
 						tracer.Error(err, "failed to debug")
 					}
 				}
@@ -194,7 +194,8 @@ func (t *TaskLoader) makeTaskGenerator(templ string) (types.TaskGenerator, error
 			for _, hook := range options.PreStartHooks {
 				if err := hook(ctx, basicVal, wfStep); err != nil {
 					tracer.Error(err, "do preStartHook")
-					return v1alpha1.StepStatus{}, nil, errors.WithMessage(err, "do preStartHook")
+					exec.err(ctx, false, err, types.StatusReasonInput)
+					return exec.status(), exec.operation(), nil
 				}
 			}
 
@@ -286,13 +287,13 @@ func buildValueForStatus(ctx wfContext.Context, step v1alpha1.WorkflowStep, temp
 }
 
 // MakeBasicValue makes basic value
-func MakeBasicValue(ctx wfContext.Context, pd *packages.PackageDiscover, step, id, parameterTemplate string, pCtx process.Context) (*value.Value, string, error) {
+func MakeBasicValue(ctx monitorContext.Context, wfCtx wfContext.Context, pd *packages.PackageDiscover, step, id, parameterTemplate string, pCtx process.Context) (*value.Value, string, error) {
 	paramStr := model.ParameterFieldName + ": {}\n"
 	if parameterTemplate != "" {
 		paramStr = fmt.Sprintf(model.ParameterFieldName+": {%s}\n", parameterTemplate)
 	}
-	template := strings.Join([]string{getContextTemplate(ctx, step, id, pCtx), paramStr}, "\n")
-	v, err := ctx.MakeParameter(template)
+	template := strings.Join([]string{getContextTemplate(ctx, wfCtx, step, id, pCtx), paramStr}, "\n")
+	v, err := wfCtx.MakeParameter(template)
 	if err != nil {
 		return nil, "", err
 	}
@@ -302,21 +303,14 @@ func MakeBasicValue(ctx wfContext.Context, pd *packages.PackageDiscover, step, i
 	return v, template, nil
 }
 
-func getContextTemplate(ctx wfContext.Context, step, id string, pCtx process.Context) string {
-	var contextTempl string
-	meta, _ := ctx.GetVar(types.ContextKeyMetadata)
-	if meta != nil {
-		ms, err := meta.String()
-		if err != nil {
-			return ""
-		}
-		contextTempl = fmt.Sprintf("\ncontext: {%s}\ncontext: stepSessionID: \"%s\"", ms, id)
-	}
+func getContextTemplate(ctx monitorContext.Context, wfCtx wfContext.Context, step, id string, pCtx process.Context) string {
+	contextTempl := fmt.Sprintf("\ncontext: stepSessionID: \"%s\"", id)
 	if pCtx == nil {
 		return ""
 	}
 	pCtx.PushData(model.ContextStepSessionID, id)
 	pCtx.PushData(model.ContextStepName, step)
+	pCtx.PushData(model.ContextSpanID, ctx.GetID())
 	c, err := pCtx.BaseContextFile()
 	if err != nil {
 		return ""
@@ -362,7 +356,7 @@ func getInputsTemplate(ctx wfContext.Context, step v1alpha1.WorkflowStep, basicV
 		if err != nil {
 			continue
 		}
-		inputsTempl += fmt.Sprintf("\ninputs: \"%s\": %s", input.From, s)
+		inputsTempl += fmt.Sprintf("\ninputs: \"%s\": {\n%s\n}", input.From, s)
 	}
 	return inputsTempl
 }
@@ -384,7 +378,9 @@ type executor struct {
 func (exec *executor) Suspend(message string) {
 	exec.suspend = true
 	exec.wfStatus.Phase = v1alpha1.WorkflowStepPhaseSucceeded
-	exec.wfStatus.Message = message
+	if message != "" {
+		exec.wfStatus.Message = message
+	}
 	exec.wfStatus.Reason = types.StatusReasonSuspend
 }
 
@@ -392,7 +388,9 @@ func (exec *executor) Suspend(message string) {
 func (exec *executor) Terminate(message string) {
 	exec.terminated = true
 	exec.wfStatus.Phase = v1alpha1.WorkflowStepPhaseSucceeded
-	exec.wfStatus.Message = message
+	if message != "" {
+		exec.wfStatus.Message = message
+	}
 	exec.wfStatus.Reason = types.StatusReasonTerminate
 }
 
@@ -402,7 +400,9 @@ func (exec *executor) Wait(message string) {
 	if exec.wfStatus.Phase != v1alpha1.WorkflowStepPhaseFailed {
 		exec.wfStatus.Phase = v1alpha1.WorkflowStepPhaseRunning
 		exec.wfStatus.Reason = types.StatusReasonWait
-		exec.wfStatus.Message = message
+		if message != "" {
+			exec.wfStatus.Message = message
+		}
 	}
 }
 
@@ -411,7 +411,16 @@ func (exec *executor) Fail(message string) {
 	exec.terminated = true
 	exec.wfStatus.Phase = v1alpha1.WorkflowStepPhaseFailed
 	exec.wfStatus.Reason = types.StatusReasonAction
-	exec.wfStatus.Message = message
+	if message != "" {
+		exec.wfStatus.Message = message
+	}
+}
+
+// Message writes message to step status, note that the message will be overwritten by the next message.
+func (exec *executor) Message(message string) {
+	if message != "" {
+		exec.wfStatus.Message = message
+	}
 }
 
 func (exec *executor) Skip(message string) {

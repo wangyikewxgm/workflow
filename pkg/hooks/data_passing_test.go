@@ -55,6 +55,25 @@ func TestInput(t *testing.T) {
 	r.NoError(err)
 	r.Equal(s, `99
 `)
+	// test set value
+	paramValue, err = wfCtx.MakeParameter(`parameter: {myscore: "test"}`)
+	r.NoError(err)
+	err = Input(wfCtx, paramValue, v1alpha1.WorkflowStep{
+		WorkflowStepBase: v1alpha1.WorkflowStepBase{
+			DependsOn: []string{"mystep"},
+			Inputs: v1alpha1.StepInputs{{
+				From:         "foo.score",
+				ParameterKey: "myscore",
+			}},
+		},
+	})
+	r.NoError(err)
+	result, err = paramValue.LookupValue("parameter", "myscore")
+	r.NoError(err)
+	s, err = result.String()
+	r.NoError(err)
+	r.Equal(s, `99
+`)
 	paramValue, err = wfCtx.MakeParameter(`context: {name: "test"}`)
 	r.NoError(err)
 	err = Input(wfCtx, paramValue, v1alpha1.WorkflowStep{
@@ -110,14 +129,14 @@ func mockContext(t *testing.T) wfContext.Context {
 		MockCreate: func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 			return nil
 		},
-		MockUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+		MockPatch: func(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			return nil
 		},
 		MockGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
 			return nil
 		},
 	}
-	wfCtx, err := wfContext.NewContext(cli, "default", "v1", nil)
+	wfCtx, err := wfContext.NewContext(context.Background(), cli, "default", "v1", nil)
 	require.NoError(t, err)
 	return wfCtx
 }

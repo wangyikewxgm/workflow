@@ -28,112 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestProvider_Load(t *testing.T) {
-	wfCtx := newWorkflowContextForTest(t)
-	r := require.New(t)
-	p := &provider{}
-	v, err := value.NewValue(`
-component: "server"
-`, nil, "")
-	r.NoError(err)
-	err = p.Load(nil, wfCtx, v, &mockAction{})
-	r.NoError(err)
-	v, err = v.LookupValue("value")
-	r.NoError(err)
-	str, err := v.String()
-	r.NoError(err)
-	r.Equal(str, expectedManifest)
-
-	// check Get Components
-	v, err = value.NewValue(`{}`, nil, "")
-	r.NoError(err)
-	err = p.Load(nil, wfCtx, v, &mockAction{})
-	r.NoError(err)
-	v, err = v.LookupValue("value", "server")
-	r.NoError(err)
-	str, err = v.String()
-	r.NoError(err)
-	r.Equal(str, expectedManifest)
-
-	errTestCases := []string{
-		`component: "not-found"`,
-		`component: 124`,
-		`component: _|_`,
-	}
-
-	for _, tCase := range errTestCases {
-		errv, err := value.NewValue(tCase, nil, "")
-		r.NoError(err)
-		err = p.Load(nil, wfCtx, errv, &mockAction{})
-		r.Error(err)
-	}
-}
-
-func TestProvider_Export(t *testing.T) {
-	wfCtx := newWorkflowContextForTest(t)
-	r := require.New(t)
-	p := &provider{}
-	v, err := value.NewValue(`
-value: {
-	spec: containers: [{
-      // +patchKey=name
-      env:[{name: "ClusterIP",value: "1.1.1.1"}]
-    }]
-}
-component: "server"
-`, nil, "")
-	r.NoError(err)
-	err = p.Export(nil, wfCtx, v, &mockAction{})
-	r.NoError(err)
-	component, err := wfCtx.GetComponent("server")
-	r.NoError(err)
-	s, err := component.Workload.String()
-	r.NoError(err)
-	r.Equal(s, `apiVersion: "v1"
-kind:       "Pod"
-metadata: {
-	labels: {
-		app: "nginx"
-	}
-}
-spec: {
-	containers: [{
-		// +patchKey=name
-		env: [{
-			name:  "APP"
-			value: "nginx"
-		}, {
-			name:  "ClusterIP"
-			value: "1.1.1.1"
-		}, ...]
-		image:           "nginx:1.14.2"
-		imagePullPolicy: "IfNotPresent"
-		name:            "main"
-		ports: [{
-			containerPort: 8080
-			protocol:      "TCP"
-		}, ...]
-	}]
-}
-`)
-
-	errCases := []string{`
-value: "1.1.1.1"
-`, `
-component: "not-found"
-value: {}
-`, `
-component: "server"
-`}
-
-	for _, tCase := range errCases {
-		v, err = value.NewValue(tCase, nil, "")
-		r.NoError(err)
-		err = p.Export(nil, wfCtx, v, &mockAction{})
-		r.Error(err)
-	}
-}
-
 func TestProvider_DoVar(t *testing.T) {
 	wfCtx := newWorkflowContextForTest(t)
 	p := &provider{}
@@ -269,6 +163,35 @@ message: "fail"
 	r.Equal(act.msg, "fail")
 }
 
+func TestProvider_Message(t *testing.T) {
+	wfCtx := newWorkflowContextForTest(t)
+	p := &provider{}
+	r := require.New(t)
+	act := &mockAction{}
+	v, err := value.NewValue(`
+message: "test"
+`, nil, "")
+	r.NoError(err)
+	err = p.Message(nil, wfCtx, nil, act)
+	r.NoError(err)
+	r.Equal(act.msg, "")
+	err = p.Message(nil, wfCtx, v, act)
+	r.NoError(err)
+	r.Equal(act.msg, "test")
+	err = p.Message(nil, wfCtx, nil, act)
+	r.NoError(err)
+	r.Equal(act.msg, "test")
+
+	act = &mockAction{}
+	v, err = value.NewValue(`
+message: "fail"
+`, nil, "")
+	r.NoError(err)
+	err = p.Fail(nil, wfCtx, v, act)
+	r.NoError(err)
+	r.Equal(act.msg, "fail")
+}
+
 type mockAction struct {
 	suspend   bool
 	terminate bool
@@ -278,7 +201,9 @@ type mockAction struct {
 
 func (act *mockAction) Suspend(msg string) {
 	act.suspend = true
-	act.msg = msg
+	if msg != "" {
+		act.msg = msg
+	}
 }
 
 func (act *mockAction) Terminate(msg string) {
@@ -288,12 +213,22 @@ func (act *mockAction) Terminate(msg string) {
 
 func (act *mockAction) Wait(msg string) {
 	act.wait = true
-	act.msg = msg
+	if msg != "" {
+		act.msg = msg
+	}
 }
 
 func (act *mockAction) Fail(msg string) {
 	act.terminate = true
-	act.msg = msg
+	if msg != "" {
+		act.msg = msg
+	}
+}
+
+func (act *mockAction) Message(msg string) {
+	if msg != "" {
+		act.msg = msg
+	}
 }
 
 func newWorkflowContextForTest(t *testing.T) wfContext.Context {
@@ -313,51 +248,9 @@ func newWorkflowContextForTest(t *testing.T) wfContext.Context {
 var (
 	testCaseYaml = `apiVersion: v1
 data:
-  components: '{"server":"{\"Scopes\":null,\"StandardWorkload\":\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Pod\\\",\\\"metadata\\\":{\\\"labels\\\":{\\\"app\\\":\\\"nginx\\\"}},\\\"spec\\\":{\\\"containers\\\":[{\\\"env\\\":[{\\\"name\\\":\\\"APP\\\",\\\"value\\\":\\\"nginx\\\"}],\\\"image\\\":\\\"nginx:1.14.2\\\",\\\"imagePullPolicy\\\":\\\"IfNotPresent\\\",\\\"name\\\":\\\"main\\\",\\\"ports\\\":[{\\\"containerPort\\\":8080,\\\"protocol\\\":\\\"TCP\\\"}]}]}}\",\"Traits\":[\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Service\\\",\\\"metadata\\\":{\\\"name\\\":\\\"my-service\\\"},\\\"spec\\\":{\\\"ports\\\":[{\\\"port\\\":80,\\\"protocol\\\":\\\"TCP\\\",\\\"targetPort\\\":8080}],\\\"selector\\\":{\\\"app\\\":\\\"nginx\\\"}}}\"]}"}'
+  test: ""
 kind: ConfigMap
 metadata:
   name: app-v1
-`
-	expectedManifest = `workload: {
-	apiVersion: "v1"
-	kind:       "Pod"
-	metadata: {
-		labels: {
-			app: "nginx"
-		}
-	}
-	spec: {
-		containers: [{
-			env: [{
-				name:  "APP"
-				value: "nginx"
-			}]
-			image:           "nginx:1.14.2"
-			imagePullPolicy: "IfNotPresent"
-			name:            "main"
-			ports: [{
-				containerPort: 8080
-				protocol:      "TCP"
-			}]
-		}]
-	}
-}
-auxiliaries: [{
-	apiVersion: "v1"
-	kind:       "Service"
-	metadata: {
-		name: "my-service"
-	}
-	spec: {
-		ports: [{
-			port:       80
-			protocol:   "TCP"
-			targetPort: 8080
-		}]
-		selector: {
-			app: "nginx"
-		}
-	}
-}]
 `
 )

@@ -205,7 +205,7 @@ close({
 	steps := []v1alpha1.WorkflowStep{
 		{
 			WorkflowStepBase: v1alpha1.WorkflowStepBase{
-				Name: "input-err",
+				Name: "input-replace",
 				Type: "ok",
 				Properties: &runtime.RawExtension{Raw: []byte(`
 {"score": {"x": 101}}
@@ -260,12 +260,18 @@ close({
 		r.NoError(err)
 		run, err := gen(step, &types.TaskGeneratorOptions{})
 		r.NoError(err)
-		status, operation, err := run.Run(wfCtx, &types.TaskRunOptions{})
+		status, operation, _ := run.Run(wfCtx, &types.TaskRunOptions{})
 		switch step.Name {
-		case "input-err":
-			r.Equal(err.Error(), "do preStartHook: parameter.score.x: conflicting values 100 and 101")
+		case "input-replace":
+			r.Equal(status.Message, "")
+			r.Equal(operation.Waiting, false)
+			r.Equal(status.Phase, v1alpha1.WorkflowStepPhaseSucceeded)
+			r.Equal(status.Reason, "")
 		case "input":
-			r.Equal(err.Error(), "do preStartHook: get input from [podIP]: failed to lookup value: var(path=podIP) not exist")
+			r.Equal(status.Message, "get input from [podIP]: failed to lookup value: var(path=podIP) not exist")
+			r.Equal(operation.Waiting, false)
+			r.Equal(status.Phase, v1alpha1.WorkflowStepPhaseFailed)
+			r.Equal(status.Reason, types.StatusReasonInput)
 		case "output-var-conflict":
 			r.Contains(status.Message, "conflict")
 			r.Equal(operation.Waiting, false)
@@ -454,7 +460,8 @@ func TestPendingInputCheck(t *testing.T) {
 	r.NoError(err)
 	run, err := gen(step, &types.TaskGeneratorOptions{})
 	r.NoError(err)
-	p, _ := run.Pending(wfCtx, nil)
+	logCtx := monitorContext.NewTraceContext(context.Background(), "test-app")
+	p, _ := run.Pending(logCtx, wfCtx, nil)
 	r.Equal(p, true)
 	score, err := value.NewValue(`
 100
@@ -462,7 +469,7 @@ func TestPendingInputCheck(t *testing.T) {
 	r.NoError(err)
 	err = wfCtx.SetVar(score, "score")
 	r.NoError(err)
-	p, _ = run.Pending(wfCtx, nil)
+	p, _ = run.Pending(logCtx, wfCtx, nil)
 	r.Equal(p, false)
 }
 
@@ -491,14 +498,15 @@ func TestPendingDependsOnCheck(t *testing.T) {
 	r.NoError(err)
 	run, err := gen(step, &types.TaskGeneratorOptions{})
 	r.NoError(err)
-	p, _ := run.Pending(wfCtx, nil)
+	logCtx := monitorContext.NewTraceContext(context.Background(), "test-app")
+	p, _ := run.Pending(logCtx, wfCtx, nil)
 	r.Equal(p, true)
 	ss := map[string]v1alpha1.StepStatus{
 		"depend": {
 			Phase: v1alpha1.WorkflowStepPhaseSucceeded,
 		},
 	}
-	p, _ = run.Pending(wfCtx, ss)
+	p, _ = run.Pending(logCtx, wfCtx, ss)
 	r.Equal(p, false)
 }
 
@@ -582,7 +590,8 @@ func TestValidateIfValue(t *testing.T) {
 		Namespace: "default",
 		Data:      map[string]interface{}{"arr": []string{"a", "b"}},
 	})
-	basicVal, basicTemplate, err := MakeBasicValue(ctx, nil, "test-step", "id", `key: "value"`, pCtx)
+	logCtx := monitorContext.NewTraceContext(context.Background(), "test-app")
+	basicVal, basicTemplate, err := MakeBasicValue(logCtx, ctx, nil, "test-step", "id", `key: "value"`, pCtx)
 	r := require.New(t)
 	r.NoError(err)
 
@@ -692,6 +701,20 @@ func TestValidateIfValue(t *testing.T) {
 			expected:    false,
 		},
 		{
+			name: "input value is struct",
+			step: v1alpha1.WorkflowStep{
+				WorkflowStepBase: v1alpha1.WorkflowStepBase{
+					If: `inputs["test-struct"].hello == "world"`,
+					Inputs: v1alpha1.StepInputs{
+						{
+							From: "test-struct",
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
 			name: "dash in if",
 			step: v1alpha1.WorkflowStep{
 				WorkflowStepBase: v1alpha1.WorkflowStepBase{
@@ -761,18 +784,18 @@ func newWorkflowContextForTest(t *testing.T) wfContext.Context {
 			}
 			return nil
 		},
-		MockUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+		MockPatch: func(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			return nil
 		},
 	}
-	wfCtx, err := wfContext.NewContext(cli, "default", "app-v1", nil)
+	wfCtx, err := wfContext.NewContext(context.Background(), cli, "default", "app-v1", nil)
 	r.NoError(err)
-	v, err := value.NewValue(`name: "app"`, nil, "")
-	r.NoError(err)
-	r.NoError(wfCtx.SetVar(v, types.ContextKeyMetadata))
-	v, err = value.NewValue(`"yes"`, nil, "")
+	v, err := value.NewValue(`"yes"`, nil, "")
 	r.NoError(err)
 	r.NoError(wfCtx.SetVar(v, "test"))
+	v, err = value.NewValue(`{hello: "world"}`, nil, "")
+	r.NoError(err)
+	r.NoError(wfCtx.SetVar(v, "test-struct"))
 	return wfCtx
 }
 
@@ -822,7 +845,7 @@ ok: {
 var (
 	testCaseYaml = `apiVersion: v1
 data:
-  components: '{"server":"{\"Scopes\":null,\"StandardWorkload\":\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Pod\\\",\\\"metadata\\\":{\\\"labels\\\":{\\\"app\\\":\\\"nginx\\\"}},\\\"spec\\\":{\\\"containers\\\":[{\\\"env\\\":[{\\\"name\\\":\\\"APP\\\",\\\"value\\\":\\\"nginx\\\"}],\\\"image\\\":\\\"nginx:1.14.2\\\",\\\"imagePullPolicy\\\":\\\"IfNotPresent\\\",\\\"name\\\":\\\"main\\\",\\\"ports\\\":[{\\\"containerPort\\\":8080,\\\"protocol\\\":\\\"TCP\\\"}]}]}}\",\"Traits\":[\"{\\\"apiVersion\\\":\\\"v1\\\",\\\"kind\\\":\\\"Service\\\",\\\"metadata\\\":{\\\"name\\\":\\\"my-service\\\"},\\\"spec\\\":{\\\"ports\\\":[{\\\"port\\\":80,\\\"protocol\\\":\\\"TCP\\\",\\\"targetPort\\\":8080}],\\\"selector\\\":{\\\"app\\\":\\\"nginx\\\"}}}\"]}"}'
+  test: ""
 kind: ConfigMap
 metadata:
   name: app-v1

@@ -34,6 +34,16 @@ spec:
             type: string
           metadata:
             type: object
+          mode:
+            description: WorkflowExecuteMode defines the mode of workflow execution
+            properties:
+              steps:
+                description: Steps is the mode of workflow steps execution
+                type: string
+              subSteps:
+                description: SubSteps is the mode of workflow sub steps execution
+                type: string
+            type: object
           steps:
             items:
               description: WorkflowStep defines how to execute a workflow step.
@@ -49,6 +59,7 @@ spec:
                 inputs:
                   description: Inputs is the inputs of the step
                   items:
+                    description: InputItem defines an input variable of WorkflowStep
                     properties:
                       from:
                         type: string
@@ -56,7 +67,6 @@ spec:
                         type: string
                     required:
                     - from
-                    - parameterKey
                     type: object
                   type: array
                 meta:
@@ -71,6 +81,7 @@ spec:
                 outputs:
                   description: Outputs is the outputs of the step
                   items:
+                    description: OutputItem defines an output variable of WorkflowStep
                     properties:
                       name:
                         type: string
@@ -100,6 +111,7 @@ spec:
                       inputs:
                         description: Inputs is the inputs of the step
                         items:
+                          description: InputItem defines an input variable of WorkflowStep
                           properties:
                             from:
                               type: string
@@ -107,7 +119,6 @@ spec:
                               type: string
                           required:
                           - from
-                          - parameterKey
                           type: object
                         type: array
                       meta:
@@ -122,6 +133,7 @@ spec:
                       outputs:
                         description: Outputs is the outputs of the step
                         items:
+                          description: OutputItem defines an output variable of WorkflowStep
                           properties:
                             name:
                               type: string
@@ -143,7 +155,6 @@ spec:
                         description: Type is the type of the workflow step.
                         type: string
                     required:
-                    - name
                     - type
                     type: object
                   type: array
@@ -154,7 +165,6 @@ spec:
                   description: Type is the type of the workflow step.
                   type: string
               required:
-              - name
               - type
               type: object
             type: array

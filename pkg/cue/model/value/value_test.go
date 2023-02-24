@@ -23,6 +23,7 @@ import (
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/format"
+	cuejson "cuelang.org/go/pkg/encoding/json"
 	"github.com/kubevela/workflow/pkg/cue/model/sets"
 
 	"github.com/pkg/errors"
@@ -944,6 +945,13 @@ func TestFillByScript(t *testing.T) {
 	}{
 		{
 			name: "insert array",
+			raw:  `a: ["hello"]`,
+			path: "a[1]",
+			v:    `"world"`,
+			expected: `a: ["hello", "world", ...]
+`},
+		{
+			name: "insert array",
 			raw:  `a: b: [{x: 100},...]`,
 			path: "a.b[1]",
 			v:    `{name: "foo"}`,
@@ -952,7 +960,26 @@ func TestFillByScript(t *testing.T) {
 		x: 100
 	}, {
 		name: "foo"
-	}]
+	}, ...]
+}
+`},
+		{
+			name: "insert array to array",
+			raw: `
+a: b: c: [{x: 100}, {x: 101}, {x: 102}]`,
+			path: "a.b.c[0].value",
+			v:    `"foo"`,
+			expected: `a: {
+	b: {
+		c: [{
+			x:     100
+			value: "foo"
+		}, {
+			x: 101
+		}, {
+			x: 102
+		}, ...]
+	}
 }
 `,
 		},
@@ -967,9 +994,9 @@ func TestFillByScript(t *testing.T) {
 			y: [{
 				name:  "key"
 				value: "foo"
-			}]
+			}, ...]
 		}
-	}]
+	}, ...]
 }
 `,
 		},
@@ -983,9 +1010,9 @@ func TestFillByScript(t *testing.T) {
 		x: {
 			y: [{
 				name: "key"
-			}]
+			}, ...]
 		}
-	}]
+	}, ...]
 	c: {
 		x: "foo"
 	}
@@ -1038,35 +1065,21 @@ func TestFillByScript(t *testing.T) {
 			raw:  `a: b: [{x: 100},...]`,
 			path: "a.b[1]+1",
 			v:    `{name: "foo"}`,
-			err:  "invalid path",
+			err:  "invalid path: invalid label a.b[1]+1 ",
 		},
 		{
 			name: "invalid path [float]",
 			raw:  `a: b: [{x: 100},...]`,
 			path: "a.b[0.1]",
 			v:    `{name: "foo"}`,
-			err:  "invalid path",
-		},
-		{
-			name: "invalid value",
-			raw:  `a: b: [{x: y:[{name: "key"}]}]`,
-			path: "a.b[0].x.y[0].value",
-			v:    `foo`,
-			err:  "remake value: a.b.x.y.value: reference \"foo\" not found",
+			err:  "invalid path: invalid literal 0.1",
 		},
 		{
 			name: "conflict merge",
 			raw:  `a: b: [{x: y:[{name: "key"}]}]`,
 			path: "a.b[0].x.y[0].name",
 			v:    `"foo"`,
-			err:  "remake value: a.b.0.x.y.0.name: conflicting values \"foo\" and \"key\"",
-		},
-		{
-			name: "filled value with wrong cue format",
-			raw:  `a: b: [{x: y:[{name: "key"}]}]`,
-			path: "a.b[0].x.y[0].value",
-			v:    `*+-`,
-			err:  "remake value: expected operand, found '}'",
+			err:  "a.b.0.x.y.0.name: conflicting values \"foo\" and \"key\"",
 		},
 	}
 
@@ -1074,8 +1087,183 @@ func TestFillByScript(t *testing.T) {
 		r := require.New(t)
 		v, err := NewValue(errCase.raw, nil, "")
 		r.NoError(err)
-		err = v.fillRawByScript(errCase.v, errCase.path)
+		errV, err := v.MakeValue(errCase.v)
+		r.NoError(err)
+		err = v.FillValueByScript(errV, errCase.path)
 		r.Equal(errCase.err, err.Error())
 	}
+}
 
+func TestSetByScript(t *testing.T) {
+	testCases := []struct {
+		name     string
+		raw      string
+		path     string
+		v        string
+		expected string
+	}{
+		{
+			name: "insert array",
+			raw:  `a: ["hello"]`,
+			path: "a[0]",
+			v:    `"world"`,
+			expected: `a: ["world"]
+`},
+		{
+			name: "insert array2",
+			raw:  `a: ["hello"]`,
+			path: "a[1]",
+			v:    `"world"`,
+			expected: `a: ["hello", "world"]
+`},
+		{
+			name: "insert array3",
+			raw:  `a: b: [{x: 100}]`,
+			path: "a.b[0]",
+			v:    `{name: "foo"}`,
+			expected: `a: {
+	b: [{
+		name: "foo"
+	}]
+}
+`},
+		{
+			name: "insert struct",
+			raw:  `a: {b: "hello"}`,
+			path: "a.b",
+			v:    `"world"`,
+			expected: `a: {
+	b: "world"
+}
+`},
+		{
+			name: "insert struct2",
+			raw:  `a: {b: "hello"}, c: {d: "world"}`,
+			path: "c.d",
+			v:    `"hello"`,
+			expected: `a: {
+	b: "hello"
+}
+c: {
+	d: "hello"
+}
+`},
+		{
+			name: "insert array to array",
+			raw: `
+a: b: c: [{x: 100}, {x: 101}, {x: 102}]`,
+			path: "a.b.c[0].value",
+			v:    `"foo"`,
+			expected: `a: {
+	b: {
+		c: [{
+			x:     100
+			value: "foo"
+		}, {
+			x: 101
+		}, {
+			x: 102
+		}]
+	}
+}
+`,
+		},
+		{
+			name: "insert nest array ",
+			raw:  `a: b: [{x: y:[{name: "key"}]}]`,
+			path: "a.b[0].x.y[0].value",
+			v:    `"foo"`,
+			expected: `a: {
+	b: [{
+		x: {
+			y: [{
+				name:  "key"
+				value: "foo"
+			}]
+		}
+	}]
+}
+`,
+		},
+		{
+			name: "insert without array",
+			raw:  `a: b: [{x: y:[{name: "key"}]}]`,
+			path: "a.c.x",
+			v:    `"foo"`,
+			expected: `a: {
+	b: [{
+		x: {
+			y: [{
+				name: "key"
+			}]
+		}
+	}]
+	c: {
+		x: "foo"
+	}
+}
+`,
+		},
+		{
+			name: "path with string index",
+			raw:  `a: b: [{x: y:[{name: "key"}]}]`,
+			path: "a.c[\"x\"]",
+			v:    `"foo"`,
+			expected: `a: {
+	b: [{
+		x: {
+			y: [{
+				name: "key"
+			}]
+		}
+	}]
+	c: {
+		x: "foo"
+	}
+}
+`,
+		},
+	}
+
+	for _, tCase := range testCases {
+		r := require.New(t)
+		v, err := NewValue(tCase.raw, nil, "")
+		r.NoError(err)
+		val, err := v.MakeValue(tCase.v)
+		r.NoError(err)
+		err = v.SetValueByScript(val, tCase.path)
+		r.NoError(err, tCase.name)
+		s, err := v.String()
+		r.NoError(err)
+		r.Equal(s, tCase.expected, tCase.name)
+	}
+}
+
+func TestSubstituteInStruct(t *testing.T) {
+	base := `
+value: {
+	a: 1
+}
+`
+	r := require.New(t)
+	val, err := NewValue(base, nil, "")
+	r.NoError(err)
+	expr, err := cuejson.Unmarshal([]byte(`{"b": 2}`))
+	r.NoError(err)
+	err = val.SubstituteInStruct(expr, "value")
+	r.NoError(err)
+	s, err := val.String()
+	r.NoError(err)
+	r.Equal(s, `value: {
+	b: 2
+}
+`)
+	err = val.SubstituteInStruct(expr, "notfound")
+	r.Error(err)
+
+	errBase := `1`
+	val1, err := NewValue(errBase, nil, "")
+	r.NoError(err)
+	err = val1.SubstituteInStruct(expr, "value")
+	r.Error(err)
 }

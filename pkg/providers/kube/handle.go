@@ -19,6 +19,8 @@ package kube
 import (
 	"context"
 
+	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/cuecontext"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -31,7 +33,7 @@ import (
 	"github.com/kubevela/pkg/util/k8s/patch"
 
 	wfContext "github.com/kubevela/workflow/pkg/context"
-	"github.com/kubevela/workflow/pkg/cue"
+	velacue "github.com/kubevela/workflow/pkg/cue"
 	"github.com/kubevela/workflow/pkg/cue/model"
 	"github.com/kubevela/workflow/pkg/cue/model/value"
 	"github.com/kubevela/workflow/pkg/types"
@@ -56,6 +58,11 @@ type Deleter func(ctx context.Context, cluster, owner string, manifest *unstruct
 type Handlers struct {
 	Apply  Dispatcher
 	Delete Deleter
+}
+
+type filters struct {
+	Namespace      string            `json:"namespace"`
+	MatchingLabels map[string]string `json:"matchingLabels"`
 }
 
 type provider struct {
@@ -121,6 +128,56 @@ func (d *dispatcher) delete(ctx context.Context, cluster, owner string, manifest
 	return d.cli.Delete(ctx, manifest)
 }
 
+// Patch patch CR in cluster.
+func (h *provider) Patch(ctx monitorContext.Context, wfCtx wfContext.Context, v *value.Value, act types.Action) error {
+	val, err := v.LookupValue("value")
+	if err != nil {
+		return err
+	}
+	obj := new(unstructured.Unstructured)
+	if err := val.UnmarshalTo(obj); err != nil {
+		return err
+	}
+	key := client.ObjectKeyFromObject(obj)
+	if key.Namespace == "" {
+		key.Namespace = "default"
+	}
+	cluster, err := v.GetString("cluster")
+	if err != nil {
+		return err
+	}
+	multiCtx := handleContext(ctx, cluster)
+	if err := h.cli.Get(multiCtx, key, obj); err != nil {
+		return err
+	}
+	baseVal := cuecontext.New().CompileString("").FillPath(cue.ParsePath(""), obj)
+	patcher, err := v.LookupValue("patch")
+	if err != nil {
+		return err
+	}
+
+	base, err := model.NewBase(baseVal)
+	if err != nil {
+		return err
+	}
+	if err := base.Unify(patcher.CueValue()); err != nil {
+		return err
+	}
+	workload, err := base.Unstructured()
+	if err != nil {
+		return err
+	}
+	for k, v := range h.labels {
+		if err := k8s.AddLabel(workload, k, v); err != nil {
+			return err
+		}
+	}
+	if err := h.handlers.Apply(multiCtx, cluster, WorkflowResourceCreator, workload); err != nil {
+		return err
+	}
+	return velacue.FillUnstructuredObject(v, workload, "result")
+}
+
 // Apply create or update CR in cluster.
 func (h *provider) Apply(ctx monitorContext.Context, wfCtx wfContext.Context, v *value.Value, act types.Action) error {
 	val, err := v.LookupValue("value")
@@ -128,27 +185,17 @@ func (h *provider) Apply(ctx monitorContext.Context, wfCtx wfContext.Context, v 
 		return err
 	}
 	var workload = new(unstructured.Unstructured)
-	pv, err := v.Field("patch")
-	if pv.Exists() && err == nil {
-		base, err := model.NewBase(val.CueValue())
-		if err != nil {
-			return err
-		}
-
-		if err := base.Unify(pv); err != nil {
-			return err
-		}
-		workload, err = base.Unstructured()
-		if err != nil {
-			return err
-		}
-	} else if err := val.UnmarshalTo(workload); err != nil {
+	if err := val.UnmarshalTo(workload); err != nil {
 		return err
 	}
 	if workload.GetNamespace() == "" {
 		workload.SetNamespace("default")
 	}
-	workload.SetLabels(h.labels)
+	for k, v := range h.labels {
+		if err := k8s.AddLabel(workload, k, v); err != nil {
+			return err
+		}
+	}
 	cluster, err := v.GetString("cluster")
 	if err != nil {
 		return err
@@ -157,7 +204,7 @@ func (h *provider) Apply(ctx monitorContext.Context, wfCtx wfContext.Context, v 
 	if err := h.handlers.Apply(deployCtx, cluster, WorkflowResourceCreator, workload); err != nil {
 		return err
 	}
-	return cue.FillUnstructuredObject(v, workload, "value")
+	return velacue.FillUnstructuredObject(v, workload, "value")
 }
 
 // ApplyInParallel create or update CRs in parallel.
@@ -216,7 +263,7 @@ func (h *provider) Read(ctx monitorContext.Context, wfCtx wfContext.Context, v *
 	if err := h.cli.Get(readCtx, key, obj); err != nil {
 		return v.FillObject(err.Error(), "err")
 	}
-	return cue.FillUnstructuredObject(v, obj, "value")
+	return velacue.FillUnstructuredObject(v, obj, "value")
 }
 
 // List lists CRs from cluster.
@@ -234,10 +281,6 @@ func (h *provider) List(ctx monitorContext.Context, wfCtx wfContext.Context, v *
 		"apiVersion": resource.APIVersion,
 	}}
 
-	type filters struct {
-		Namespace      string            `json:"namespace"`
-		MatchingLabels map[string]string `json:"matchingLabels"`
-	}
 	filterValue, err := v.LookupValue("filter")
 	if err != nil {
 		return err
@@ -258,7 +301,7 @@ func (h *provider) List(ctx monitorContext.Context, wfCtx wfContext.Context, v *
 	if err := h.cli.List(readCtx, list, listOpts...); err != nil {
 		return v.FillObject(err.Error(), "err")
 	}
-	return cue.FillUnstructuredObject(v, list, "list")
+	return velacue.FillUnstructuredObject(v, list, "list")
 }
 
 // Delete deletes CR from cluster.
@@ -276,9 +319,26 @@ func (h *provider) Delete(ctx monitorContext.Context, wfCtx wfContext.Context, v
 		return err
 	}
 	deleteCtx := handleContext(ctx, cluster)
+
+	if filterValue, err := v.LookupValue("filter"); err == nil {
+		filter := &filters{}
+		if err := filterValue.UnmarshalTo(filter); err != nil {
+			return err
+		}
+		labelSelector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: filter.MatchingLabels})
+		if err != nil {
+			return err
+		}
+		if err := h.cli.DeleteAllOf(deleteCtx, obj, &client.DeleteAllOfOptions{ListOptions: client.ListOptions{Namespace: filter.Namespace, LabelSelector: labelSelector}}); err != nil {
+			return v.FillObject(err.Error(), "err")
+		}
+		return nil
+	}
+
 	if err := h.handlers.Delete(deleteCtx, cluster, WorkflowResourceCreator, obj); err != nil {
 		return v.FillObject(err.Error(), "err")
 	}
+
 	return nil
 }
 
@@ -304,5 +364,6 @@ func Install(p types.Providers, cli client.Client, labels map[string]string, han
 		"read":              prd.Read,
 		"list":              prd.List,
 		"delete":            prd.Delete,
+		"patch":             prd.Patch,
 	})
 }

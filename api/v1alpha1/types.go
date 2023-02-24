@@ -106,7 +106,9 @@ type WorkflowSpec struct {
 
 // WorkflowExecuteMode defines the mode of workflow execution
 type WorkflowExecuteMode struct {
-	Steps    WorkflowMode `json:"steps,omitempty"`
+	// Steps is the mode of workflow steps execution
+	Steps WorkflowMode `json:"steps,omitempty"`
+	// SubSteps is the mode of workflow sub steps execution
 	SubSteps WorkflowMode `json:"subSteps,omitempty"`
 }
 
@@ -141,6 +143,7 @@ type Workflow struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	Mode         *WorkflowExecuteMode `json:"mode,omitempty"`
 	WorkflowSpec `json:",inline"`
 }
 
@@ -168,7 +171,7 @@ type WorkflowStepMeta struct {
 // WorkflowStepBase defines the workflow step base
 type WorkflowStepBase struct {
 	// Name is the unique name of the workflow step.
-	Name string `json:"name"`
+	Name string `json:"name,omitempty"`
 	// Type is the type of the workflow step.
 	Type string `json:"type"`
 	// Meta is the meta data of the workflow step.
@@ -244,8 +247,6 @@ const (
 	WorkflowStepPhaseFailed WorkflowStepPhase = "failed"
 	// WorkflowStepPhaseSkipped will make the controller skip the step.
 	WorkflowStepPhaseSkipped WorkflowStepPhase = "skipped"
-	// WorkflowStepPhaseStopped will make the controller stop the workflow.
-	WorkflowStepPhaseStopped WorkflowStepPhase = "stopped"
 	// WorkflowStepPhaseRunning will make the controller continue the workflow.
 	WorkflowStepPhaseRunning WorkflowStepPhase = "running"
 	// WorkflowStepPhasePending will make the controller wait for the step to run.
@@ -253,17 +254,19 @@ const (
 )
 
 // StepOutputs defines output variable of WorkflowStep
-type StepOutputs []outputItem
+type StepOutputs []OutputItem
 
 // StepInputs defines variable input of WorkflowStep
-type StepInputs []inputItem
+type StepInputs []InputItem
 
-type inputItem struct {
-	ParameterKey string `json:"parameterKey"`
+// InputItem defines an input variable of WorkflowStep
+type InputItem struct {
+	ParameterKey string `json:"parameterKey,omitempty"`
 	From         string `json:"from"`
 }
 
-type outputItem struct {
+// OutputItem defines an output variable of WorkflowStep
+type OutputItem struct {
 	ValueFrom string `json:"valueFrom"`
 	Name      string `json:"name"`
 }
